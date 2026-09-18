@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+backend/data/
+*.db
+
+# 密钥 / 本地配置
+.env
+backend/.env
+
+# Node
+node_modules/
+frontend/dist/
+*.local
+
+# macOS
+.DS_Store
