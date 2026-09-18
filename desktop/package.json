@@ -1,6 +1,6 @@
 {
   "name": "merch-flow-desktop",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Electron 壳：内置 Python 后端（FastAPI + 前端 dist）的桌面应用",
   "main": "main.js",

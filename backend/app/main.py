@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI 商品聚合 / 上架助手",
-    version="0.3.0",
+    version="0.3.1",
     description=(
         "给一个 URL，deepseek harness 自己递归翻页把商品抽出来（app/agent/），"
         "结果落库；上架接口见 app/routers/listings.py。"
