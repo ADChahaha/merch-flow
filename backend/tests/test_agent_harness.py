@@ -52,6 +52,9 @@ def test_prompt_hands_url_to_agent():
     assert "products.json" in prompt
     assert "自己判断" in prompt
     assert "./fetch" in prompt
+    assert "./fetch_raw" in prompt  # 要看原始 HTML 时有现成命令，不用自己写请求
+    assert "app.agent.fetch.Fetcher" in prompt  # 仓库里能复用的代码直接点名
+    assert "省步数" in prompt
 
 
 def test_write_workdir_creates_tools_and_patch(tmp_path):
@@ -79,9 +82,10 @@ def test_write_workdir_thinking_off_disables_reasoning(tmp_path):
 
 def test_fetch_script_is_runnable_python(tmp_path):
     write_workdir(tmp_path, URL, model="deepseek-v4-flash", thinking="off")
-    script = (tmp_path / "fetch_page.py").read_text(encoding="utf-8")
-    compile(script, "fetch_page.py", "exec")
-    assert "app.agent.fetch" in script
+    for name in ("fetch_page.py", "fetch_raw_page.py"):
+        source = (tmp_path / name).read_text(encoding="utf-8")
+        compile(source, name, "exec")
+        assert "app.agent.fetch" in source  # 复用仓库的 Fetcher，不另起炉灶
 
 
 # --------------------------------------------------------------------------- #

@@ -36,12 +36,22 @@ from .tokens import format_usage, read_session_usage
 # --------------------------------------------------------------------------- #
 PROMPT_TEMPLATE = """你是电商商品抓取 agent。任务：从 {url} 出发，找齐这个页面/站点下的所有商品。
 
-工作目录里准备好了工具，随你使用：
+工作目录里准备好了命令，随你使用：
 - `./fetch <url>`：抓取页面并输出 JSON（标题 / 正文 / 图片 / 链接）。已处理直连和 Cloudflare 兜底，超时自己加。
-- python 环境可用（httpx / lxml / curl_cffi 都装了），你也可以直接写自己的抓取、解析脚本。
-- `TASK.md` 里有任务说明，`fetch_page.py` 是上面工具的源码，可以改。
+- `./fetch_raw <url> [out.html]`：抓原始 HTML 存成文件（正文被截断、需要看原始结构时用）。
+- `TASK.md` 里有任务说明；`fetch_page.py` / `fetch_raw_page.py` 是上面命令的源码，可以改。
+
+仓库里已有的代码优先复用，别重写（脚本开头 `sys.path.insert(0, {backend!r})` 后 import）：
+- 抓取：`app.agent.fetch.Fetcher`（直连 + Cloudflare 兜底；`get_html(url)` 就是原始 HTML，别自己写请求）
+- 解析：`app.agent.page`：`parse_html` / `extract_text` / `extract_images` / `extract_links` / `page_title`
+- python 环境可用（httpx / lxml / curl_cffi 都装了）
 
 怎么翻页、递归几层、跟哪些链接、怎么从 HTML 里抽字段——全部自己判断，不需要问我。
+
+省步数（每一步都要把整个上下文重发一遍，很贵，务必照做）：
+- 先写一个脚本一次性完成「抓取 → 解析 → 写出 products.json → 自检」，跑通即可；
+- 不要用多次小命令逐步探查同一个文件（例如一条命令只 print 一个 key，分四遍看 images / text / links）；
+- products.json 写完不要 read 回来看，自检在脚本里做（json.load 后检查字段和数量）。
 
 产出要求：
 1. 商品 = 单品级条目（周边、谷子、书籍、CD/Blu-ray、门票、手办……）：名称 / 价格 / 图片 / 发售日或举办日期 / 详情 / 来源 URL。
@@ -65,7 +75,7 @@ PROMPT_TEMPLATE = """你是电商商品抓取 agent。任务：从 {url} 出发�
 
 
 def build_prompt(url: str) -> str:
-    return PROMPT_TEMPLATE.format(url=url)
+    return PROMPT_TEMPLATE.format(url=url, backend=str(BASE_DIR))
 
 
 # --------------------------------------------------------------------------- #
@@ -124,8 +134,43 @@ if __name__ == "__main__":
 '''
 
 
-def _fetch_wrapper(workdir: Path) -> str:
-    return "#!/bin/sh\n" f'exec "{sys.executable}" "{workdir / "fetch_page.py"}" "$@"\n'
+def _fetch_raw_script() -> str:
+    """抓原始 HTML 的小工具：正文被截断/要看原始结构时用，省得 agent 自己写请求。"""
+    return f'''#!/usr/bin/env python3
+"""抓原始 HTML 存文件。用法：python fetch_raw_page.py <url> [out.html]"""
+import sys
+from pathlib import Path
+
+BACKEND = Path({str(BASE_DIR)!r})
+sys.path.insert(0, str(BACKEND))
+
+from app.agent.fetch import Fetcher  # noqa: E402
+from app.config import settings  # noqa: E402
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("用法: python fetch_raw_page.py <url> [out.html]", file=sys.stderr)
+        return 2
+    url = sys.argv[1]
+    out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("raw_page.html")
+    fetcher = Fetcher(settings)
+    try:
+        html = fetcher.get_html(url)
+    finally:
+        fetcher.close()
+    out.write_text(html, encoding="utf-8")
+    print(f"{{out}}（{{len(html)}} 字符）")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def _fetch_wrapper(workdir: Path, script: str = "fetch_page.py") -> str:
+    return "#!/bin/sh\n" f'exec "{sys.executable}" "{workdir / script}" "$@"\n'
 
 
 def _dsh_patch(model: str, thinking: str) -> str:
@@ -152,11 +197,13 @@ def _dsh_patch(model: str, thinking: str) -> str:
 
 def write_workdir(out_dir: Path, url: str, *, model: str, thinking: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    fetch_page = out_dir / "fetch_page.py"
-    fetch_page.write_text(_fetch_script(), encoding="utf-8")
-    wrapper = out_dir / "fetch"
-    wrapper.write_text(_fetch_wrapper(out_dir), encoding="utf-8")
-    wrapper.chmod(0o755)
+    for script in ("fetch_page.py", "fetch_raw_page.py"):
+        source = _fetch_script() if script == "fetch_page.py" else _fetch_raw_script()
+        (out_dir / script).write_text(source, encoding="utf-8")
+    for command in ("fetch", "fetch_raw"):
+        wrapper = out_dir / command
+        wrapper.write_text(_fetch_wrapper(out_dir, f"{command}_page.py"), encoding="utf-8")
+        wrapper.chmod(0o755)
     (out_dir / "TASK.md").write_text(
         f"# 商品抓取任务\n\n入口 URL：{url}\n\n{build_prompt(url)}\n",
         encoding="utf-8",
