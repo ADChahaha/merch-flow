@@ -31,6 +31,8 @@ class AgentJob(Base):
     agent_session: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     # agent 的完整执行日志（一行一条，前端右下角 popup 回放用）
     log: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    # 整个会话（含续聊）累计 token：{input, output, cache_read, cache_write, total}
+    usage: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

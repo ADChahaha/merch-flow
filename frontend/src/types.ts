@@ -67,6 +67,15 @@ export type AgentLogLine = {
 
 export type AgentJobStatus = 'running' | 'done' | 'error'
 
+/** 整个会话（含续聊）累计 token 用量 */
+export type TokenUsage = {
+  input: number
+  output: number
+  cache_read: number
+  cache_write: number
+  total: number
+}
+
 /** 左栏 AI 记录（列表轻量版，不含日志/商品） */
 export type AgentJobSummary = {
   id: number
@@ -78,6 +87,8 @@ export type AgentJobSummary = {
   error: string
   pages_visited: number
   product_count: number
+  /** 整个会话（含续聊）累计 token；dsh 存不下来时是空对象 */
+  usage?: TokenUsage
   created_at: string | null
   finished_at: string | null
 }

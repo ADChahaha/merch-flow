@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { AgentJob, AgentProductInput, Offer } from '../types'
-import { hostOf } from '../lib/agent'
+import { hostOf, usageSummary } from '../lib/agent'
 import { IconCheckCircle, IconPlus, IconSpark, IconSpinner, IconTrash, IconXCircle } from './Icons'
 import { OfferCard } from './OfferCard'
 
@@ -183,7 +183,13 @@ export function AgentPanel({
           >
             {agentJob.url}
           </a>
-          <span>商品随进度写入</span>
+          {agentJob.usage?.total ? (
+            <span className="text-slate-500" title="这个会话（含追问/续聊）累计消耗的 token">
+              {usageSummary(agentJob.usage)}
+            </span>
+          ) : (
+            <span>商品随进度写入</span>
+          )}
         </div>
       )}
 

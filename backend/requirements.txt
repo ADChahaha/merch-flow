@@ -12,6 +12,8 @@ scrapling[fetchers]==0.4.15
 curl_cffi==0.16.3
 
 # AI 抓取（app/agent/）：agent 走官方 DeepSeek Harness（dsh），不在 Python 依赖里
+# zstandard：读 dsh 会话日志（.jsonl.zstd）统计整个会话的 token；没有就退回 zstd 命令
+zstandard==0.24.0
 #   npm install -g @deepseek-ai/dsh
 # 然后在「设置 → AI 抓取」里填 DEEPSEEK_API_KEY（或写 backend/.env，见 .env.example）
 

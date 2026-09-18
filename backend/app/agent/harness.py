@@ -29,6 +29,7 @@ from urllib.parse import urljoin
 from ..config import BASE_DIR, settings
 from .acp import AcpClient, AcpError, summarize_update
 from .publish import build_publish_prompt, read_publish_result, write_publish_workdir
+from .tokens import format_usage, read_session_usage
 
 # --------------------------------------------------------------------------- #
 # 给 agent 的提示词（它拿到的全部世界观）
@@ -273,6 +274,7 @@ def run_task(
         "session_id": session_id or "",
         "reply": "",
         "error": "",
+        "usage": {},
     }
     state = {"reply": ""}
 
@@ -334,6 +336,17 @@ def run_task(
     except Exception as exc:  # noqa: BLE001 dsh 各种异常都收成任务失败
         result["error"] = str(exc)
         emit("error", f"agent 执行失败：{exc}")
+
+    # 整个会话（含之前的续聊）的累计 token：dsh 进程退出后再读，日志才是完整的
+    if result["session_id"]:
+        try:
+            usage = read_session_usage(result["session_id"])
+        except Exception as exc:  # noqa: BLE001 统计失败不影响任务结果
+            usage = None
+            emit("info", f"token 统计失败：{exc}")
+        if usage:
+            result["usage"] = usage
+            emit("info", f"本次会话累计 {format_usage(usage)}")
 
     reply = state["reply"].strip()
     result["reply"] = reply

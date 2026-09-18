@@ -133,6 +133,7 @@ def wait_persisted(factory, job_id: int, timeout: float = 15.0) -> dict:
                     "status": job.status,
                     "error": job.error,
                     "agent_session": job.agent_session,
+                    "usage": dict(job.usage or {}),
                     "products": [
                         {"name": p.name, "price": p.price, "price_text": p.price_text}
                         for p in job.products
@@ -176,6 +177,61 @@ def test_job_runs_and_persists_products(agent_client):
     assert job["status"] == "done"
     assert [p["name"] for p in job["products"]] == ["缶バッジ「テスト」"]
     assert job["products"][0]["price_text"] == "550円(税込)"
+    assert job["usage"] == {}
+
+
+def test_job_persists_token_usage(agent_client):
+    """整个会话的 token 用量跟着任务落库，列表/详情都能看到。"""
+    client, factory = agent_client
+    usage = {"input": 31710, "output": 11971, "cache_read": 431488, "cache_write": 0, "total": 475169}
+    FakePopen.lines = [{"type": "result", **RESULT, "usage": usage}]
+
+    job_id = client.post("/api/agent/jobs", json={"url": URL}).json()["id"]
+    body = wait_done(client, job_id)
+    assert body["usage"] == usage
+
+    summary = client.get("/api/agent/jobs").json()[0]
+    assert summary["usage"]["total"] == 475169
+
+    job = wait_persisted(factory, job_id)
+    assert job["usage"] == usage
+
+
+def test_backfill_job_usage_for_old_jobs(agent_client, tmp_path, monkeypatch):
+    """上线前跑的老任务（没存过 usage）从 dsh 会话日志里补一次。"""
+    import app.agent.jobs as jobs_module
+    from app.models import AgentJob
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh"))
+    session_dir = tmp_path / "dsh" / "sessions" / "--x--" / "sess-old"
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.v3.jsonl").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "usage": {
+                        "inputTokens": 100,
+                        "outputTokens": 20,
+                        "cacheReadTokens": 3000,
+                        "cacheWriteTokens": 0,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, factory = agent_client
+    with factory() as session:
+        session.add(AgentJob(url=URL, status="done", agent_session="sess-old"))
+        session.commit()
+
+    assert jobs_module.backfill_job_usage(factory) == 1
+    with factory() as session:
+        job = session.query(AgentJob).filter_by(agent_session="sess-old").one()
+        assert job.usage["total"] == 3120
+    # 再补一次不重复算
+    assert jobs_module.backfill_job_usage(factory) == 0
 
 
 def test_chat_continues_session_and_updates_products(agent_client):

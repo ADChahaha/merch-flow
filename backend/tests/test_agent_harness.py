@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import app.agent.harness as harness_module
 from app.agent.acp import AcpNotFound, summarize_update
 from app.agent.harness import (
     build_prompt,
@@ -235,6 +236,28 @@ def test_run_task_collects_products_and_streams_updates(tmp_path):
     assert calls[0][:2] == ["initialize", "new_session"]
     prompt_call = next(call for call in calls[0] if isinstance(call, tuple) and call[0] == "prompt")
     assert URL in prompt_call[2]
+
+
+def test_run_task_reports_session_token_usage(tmp_path, monkeypatch):
+    """harness 跑完从 dsh 会话日志里取整个会话的累计 token，写进 result 和日志。"""
+    usage = {"input": 47810, "output": 12449, "cache_read": 796544, "cache_write": 0, "total": 856803}
+    monkeypatch.setattr(harness_module, "read_session_usage", lambda session_id: dict(usage))
+
+    result, logs, events = run(tmp_path)
+
+    assert result["usage"] == usage
+    assert events[-1]["usage"] == usage
+    assert any("856.8k" in text for _, text in logs)
+
+
+def test_run_task_without_usage_still_succeeds(tmp_path, monkeypatch):
+    """dsh 换了存储格式读不到 token：任务结果不受影响。"""
+    monkeypatch.setattr(harness_module, "read_session_usage", lambda session_id: None)
+
+    result, logs, _ = run(tmp_path)
+
+    assert result["error"] == ""
+    assert result["usage"] == {}
 
 
 def test_run_task_resume_sends_user_prompt_verbatim(tmp_path):

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { AgentJobSummary } from '../types'
-import { hostOf } from '../lib/agent'
+import { formatTokens, hostOf } from '../lib/agent'
 import { IconPlus, IconSearch, IconSpark, IconSpinner, IconTrash, IconXCircle } from './Icons'
 
 type Props = {
@@ -149,6 +149,14 @@ export function AgentJobList({
                           ? '已完成（看截图/日志）'
                           : `${job.product_count} 件商品`}
                   </span>
+                  {job.usage?.total ? (
+                    <span
+                      className="shrink-0 tabular-nums"
+                      title="整个会话（含追问/续聊）累计消耗的 token"
+                    >
+                      · Token {formatTokens(job.usage.total)}
+                    </span>
+                  ) : null}
                 </span>
               </button>
 

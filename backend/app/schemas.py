@@ -144,6 +144,8 @@ class AgentJobSummaryOut(BaseModel):
     error: str = ""
     pages_visited: int = 0
     product_count: int = 0
+    # 整个会话（含续聊）累计 token：{input, output, cache_read, cache_write, total}
+    usage: dict[str, int] = Field(default_factory=dict)
     created_at: datetime | None = None
     finished_at: datetime | None = None
 
@@ -158,6 +160,7 @@ class AgentJobSummaryOut(BaseModel):
             error=job.error,
             pages_visited=job.pages_visited,
             product_count=len(job.products),
+            usage=dict(job.usage or {}),
             created_at=job.created_at,
             finished_at=job.finished_at,
         )
@@ -178,6 +181,7 @@ class AgentJobOut(AgentJobSummaryOut):
             error=job.error,
             pages_visited=job.pages_visited,
             product_count=len(job.products),
+            usage=dict(job.usage or {}),
             created_at=job.created_at,
             finished_at=job.finished_at,
             log=list(job.log or []),
@@ -195,6 +199,7 @@ class AgentJobOut(AgentJobSummaryOut):
             error=live.error,
             pages_visited=live.pages_visited,
             product_count=len(live.products),
+            usage=dict(getattr(live, "usage", None) or {}),
             log=list(live.log),
             products=[AgentProductOut.of_live(item) for item in live.products],
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -63,6 +64,7 @@ def _ensure_columns() -> None:
     additions = {
         "agent_session": "VARCHAR(64) NOT NULL DEFAULT ''",
         "kind": "VARCHAR(32) NOT NULL DEFAULT 'scrape'",
+        "usage": "JSON NOT NULL DEFAULT '{}'",
     }
     with engine.begin() as conn:
         for name, ddl in additions.items():
@@ -75,6 +77,14 @@ def init_db() -> None:
 
     Base.metadata.create_all(engine)
     _ensure_columns()
+
+    # 老任务（这个功能上线前跑的）从 dsh 会话日志里补 token 统计
+    try:
+        from .agent.jobs import backfill_job_usage
+
+        backfill_job_usage()
+    except Exception:  # noqa: BLE001 统计补不上不能挡住启动
+        logging.getLogger(__name__).exception("token 用量回填失败")
 
 
 def get_session() -> Iterator[Session]:

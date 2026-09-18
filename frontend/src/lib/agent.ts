@@ -1,4 +1,4 @@
-import type { AgentJob, AgentJobSummary, AgentProduct, Offer } from '../types'
+import type { AgentJob, AgentJobSummary, AgentProduct, Offer, TokenUsage } from '../types'
 import { yen } from './format'
 
 export function hostOf(url: string): string {
@@ -19,6 +19,7 @@ export function agentSummaryOf(job: AgentJob | AgentJobSummary): AgentJobSummary
     error: job.error,
     pages_visited: job.pages_visited,
     product_count: job.product_count,
+    usage: job.usage,
     created_at: job.created_at,
     finished_at: job.finished_at,
   }
@@ -53,4 +54,17 @@ export function agentProductToOffer(product: AgentProduct, job: AgentJob | Agent
     is_buyable: true,
     not_buyable_reason: '',
   }
+}
+
+/** 12345 → 12.3k；整个会话的 token 总量都按这个显示。 */
+export function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`
+  return String(value)
+}
+
+/** 「Token 856.8k（输入 48.2k · 输出 12.8k · 缓存命中 855.9k）」；没数据返回空串。 */
+export function usageSummary(usage?: TokenUsage): string {
+  if (!usage || !usage.total) return ''
+  return `Token ${formatTokens(usage.total)}（输入 ${formatTokens(usage.input)} · 输出 ${formatTokens(usage.output)} · 缓存命中 ${formatTokens(usage.cache_read)}）`
 }

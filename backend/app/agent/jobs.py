@@ -23,6 +23,7 @@ from ..config import BASE_DIR, settings
 from ..db import session_scope
 from ..domain.listing import utcnow
 from ..models import AgentJob, AgentProduct
+from .tokens import read_session_usage
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,8 @@ class LiveJob:
     agent_session: str = ""
     # 最近一轮 agent 的回复
     reply: str = ""
+    # 整个会话（含续聊）累计 token：{input, output, cache_read, cache_write, total}
+    usage: dict = field(default_factory=dict)
     log: list[dict] = field(default_factory=list)
     products: list[dict] = field(default_factory=list)
 
@@ -59,6 +62,7 @@ class LiveJob:
             "pages_visited": self.pages_visited,
             "agent_session": self.agent_session,
             "reply": self.reply,
+            "usage": self.usage,
             "log": self.log,
             "products": self.products,
         }
@@ -124,6 +128,7 @@ class JobManager:
                 error=job.error,
                 pages_visited=job.pages_visited,
                 agent_session=job.agent_session or "",
+                usage=dict(job.usage or {}),
                 log=list(job.log or []),
                 products=[
                     {
@@ -273,6 +278,8 @@ class JobManager:
             live.title = str(event.get("title") or live.title)
             live.agent_session = str(event.get("session_id") or live.agent_session)
             live.reply = str(event.get("reply") or live.reply)
+            if isinstance(event.get("usage"), dict):
+                live.usage = dict(event["usage"])
             if event.get("error"):
                 live.error = str(event["error"])
 
@@ -404,6 +411,7 @@ class JobManager:
                 job.error = live.error
                 job.pages_visited = live.pages_visited
                 job.agent_session = live.agent_session
+                job.usage = live.usage or {}
                 job.log = live.log[-MAX_LOG_LINES:]
                 job.finished_at = utcnow()
                 for existing in list(job.products):
@@ -427,3 +435,28 @@ class JobManager:
 
 
 manager = JobManager()
+
+
+def backfill_job_usage(factory=None) -> int:
+    """给上线前跑的老任务补 token 统计：从 dsh 会话日志读一次写库，返回补了几条。
+
+    init_db 里调一次。读不到（dsh 清过日志/换了存储格式）就跳过，不影响启动。
+    """
+    from sqlalchemy import select
+
+    from ..db import SessionLocal
+
+    factory = factory or SessionLocal
+    filled = 0
+    with factory() as session:
+        rows = session.scalars(select(AgentJob).where(AgentJob.agent_session != "")).all()
+        for row in rows:
+            if row.usage:
+                continue
+            usage = read_session_usage(row.agent_session)
+            if usage:
+                row.usage = usage
+                filled += 1
+        if filled:
+            session.commit()
+    return filled
