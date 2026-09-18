@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..agent.jobs import manager
-from ..config import BASE_DIR
+from ..config import settings
 from ..db import get_session
 from ..models import AgentJob
 from ..schemas import (
@@ -33,7 +33,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
 def _job_workdir(job_id: int) -> Path:
-    return Path(BASE_DIR) / "data" / "agent_jobs" / str(job_id)
+    return Path(settings.data_dir) / "data" / "agent_jobs" / str(job_id)
 
 
 def _validate_url(raw: str) -> str:

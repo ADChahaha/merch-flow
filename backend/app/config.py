@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# 数据目录：.env / 数据库 / agent_jobs 都放这。打包版由 Electron 指到系统应用数据目录
+# （EC_DATA_DIR），源码运行时就是 backend/。基线值在后文 DATA_DIR 定义。
 
 
 def _load_dotenv(path: Path) -> None:
@@ -28,7 +30,15 @@ def _load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
-_load_dotenv(BASE_DIR / ".env")
+def _resolve_data_dir() -> Path:
+    value = (os.getenv("EC_DATA_DIR") or "").strip()
+    return Path(value).expanduser() if value else BASE_DIR
+
+
+DATA_DIR = _resolve_data_dir()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+_load_dotenv(DATA_DIR / ".env")
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -47,8 +57,11 @@ def _env_int(key: str, default: int) -> int:
 
 @dataclass
 class Settings:
+    # ---- 数据目录 ----
+    data_dir: Path = DATA_DIR
+
     # ---- 数据库 ----
-    db_url: str = os.getenv("EC_DB_URL", f"sqlite:///{BASE_DIR / 'data' / 'ec.db'}")
+    db_url: str = os.getenv("EC_DB_URL", f"sqlite:///{DATA_DIR / 'data' / 'ec.db'}")
 
     # ---- 反爬（AI 抓取的页面获取用：直连失败退到浏览器通道） ----
     # Chrome 可执行文件。留空 = 按平台自动探测（macOS / Windows / Linux 的常见安装路径）

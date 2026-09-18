@@ -15,5 +15,10 @@ node_modules/
 frontend/dist/
 *.local
 
+# 打包产物
+backend/build/
+backend/dist/
+desktop/release/
+
 # macOS
 .DS_Store

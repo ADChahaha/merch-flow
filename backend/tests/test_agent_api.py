@@ -90,7 +90,8 @@ def agent_client(monkeypatch, tmp_path):
             session.close()
 
     monkeypatch.setattr(jobs_module, "session_scope", test_scope)
-    monkeypatch.setattr(jobs_module, "BASE_DIR", str(tmp_path))
+    # 任务目录跟着数据目录走（settings.data_dir 是共享实例，测试里挪到 tmp）
+    monkeypatch.setattr(jobs_module.settings, "data_dir", tmp_path)
     monkeypatch.setattr(jobs_module.subprocess, "Popen", FakePopen)
 
     main.app.dependency_overrides[get_session] = functools.partial(_session_gen, factory)
@@ -353,11 +354,10 @@ def test_taobao_browser_publish_job(agent_client, tmp_path):
     listed = client.get("/api/agent/jobs").json()
     assert any(item["id"] == job_id and item["kind"] == "taobao_publish" for item in listed)
 
-    # 模拟 agent 截了图 → files 接口能列出来、能取到
-    # （router 用的是它自己模块里 import 的 BASE_DIR，测试就写到那个位置）
+    # 模拟 agent 截了图 → files 接口能列出来、能取到（router 也用 settings.data_dir）
     from app.routers import agent as agent_router
 
-    shots = Path(agent_router.BASE_DIR) / "data" / "agent_jobs" / str(job_id) / "shots"
+    shots = Path(agent_router.settings.data_dir) / "data" / "agent_jobs" / str(job_id) / "shots"
     shots.mkdir(parents=True, exist_ok=True)
     (shots / "step1.png").write_bytes(b"\x89PNG\r\n")
     files = client.get(f"/api/agent/jobs/{job_id}/files").json()["files"]

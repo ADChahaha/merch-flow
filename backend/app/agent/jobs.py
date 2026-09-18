@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from ..config import BASE_DIR, settings
+from ..config import settings
 from ..db import session_scope
 from ..domain.listing import utcnow
 from ..models import AgentJob, AgentProduct
@@ -297,13 +297,16 @@ class JobManager:
         if live is None:
             return
 
-        out_dir = Path(BASE_DIR) / "data" / "agent_jobs" / str(job_id)
+        out_dir = Path(settings.data_dir) / "data" / "agent_jobs" / str(job_id)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
+        # 打包版（PyInstaller）：sys.executable 是后端本体，用 --harness 分发到同一份代码
+        harness_cmd = [sys.executable, "--harness"] if getattr(sys, "frozen", False) else [
             sys.executable,
             "-m",
             "app.agent.harness",
+        ]
+        cmd = harness_cmd + [
             "--url",
             live.url,
             "--out",
@@ -334,7 +337,7 @@ class JobManager:
         try:
             proc = subprocess.Popen(
                 cmd,
-                cwd=str(BASE_DIR),
+                cwd=str(settings.data_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

@@ -9,9 +9,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ..config import BASE_DIR
+from ..config import DATA_DIR
 
-ENV_PATH = Path(BASE_DIR) / ".env"
+ENV_PATH = DATA_DIR / ".env"
 
 
 def update_env_file(updates: dict[str, str], path: Path | None = None) -> Path:

@@ -39,12 +39,7 @@ PROMPT_TEMPLATE = """你是电商商品抓取 agent。任务：从 {url} 出发�
 工作目录里准备好了命令，随你使用：
 - `./fetch <url>`：抓取页面并输出 JSON（标题 / 正文 / 图片 / 链接）。已处理直连和 Cloudflare 兜底，超时自己加。
 - `./fetch_raw <url> [out.html]`：抓原始 HTML 存成文件（正文被截断、需要看原始结构时用）。
-- `TASK.md` 里有任务说明；`fetch_page.py` / `fetch_raw_page.py` 是上面命令的源码，可以改。
-
-仓库里已有的代码优先复用，别重写（脚本开头 `sys.path.insert(0, {backend!r})` 后 import）：
-- 抓取：`app.agent.fetch.Fetcher`（直连 + Cloudflare 兜底；`get_html(url)` 就是原始 HTML，别自己写请求）
-- 解析：`app.agent.page`：`parse_html` / `extract_text` / `extract_images` / `extract_links` / `page_title`
-- python 环境可用（httpx / lxml / curl_cffi 都装了）
+{tools}
 
 怎么翻页、递归几层、跟哪些链接、怎么从 HTML 里抽字段——全部自己判断，不需要问我。
 
@@ -74,68 +69,52 @@ PROMPT_TEMPLATE = """你是电商商品抓取 agent。任务：从 {url} 出发�
 4. 写完自查一遍 products.json 是合法 JSON，然后回复一句话总结（找到多少件商品）。"""
 
 
-def build_prompt(url: str) -> str:
-    return PROMPT_TEMPLATE.format(url=url, backend=str(BASE_DIR))
+# 开发（源码运行）：工具是 python 脚本，仓库代码可复用、可 import
+DEV_TOOLS = """- `TASK.md` 里有任务说明；`fetch_page.py` / `fetch_raw_page.py` 是上面命令的源码，可以改。
+
+仓库里已有的代码优先复用，别重写（脚本开头 `sys.path.insert(0, {backend!r})` 后 import）：
+- 抓取：`app.agent.fetch.Fetcher`（直连 + Cloudflare 兜底；`get_html(url)` 就是原始 HTML，别自己写请求）
+- 解析：`app.agent.page`：`parse_html` / `extract_text` / `extract_images` / `extract_links` / `page_title`
+- python 环境可用（httpx / lxml / curl_cffi 都装了）"""
+
+# 打包版：抓取走内置工具（后端同款代码），不依赖仓库路径
+FROZEN_TOOLS = """- 这两个命令由应用内置，直接可用。"""
+
+
+def build_prompt(url: str, *, frozen: bool | None = None) -> str:
+    if frozen is None:
+        frozen = is_frozen()
+    tools = FROZEN_TOOLS if frozen else DEV_TOOLS.format(backend=str(BASE_DIR))
+    return PROMPT_TEMPLATE.format(url=url, tools=tools)
 
 
 # --------------------------------------------------------------------------- #
 # 任务目录
 # --------------------------------------------------------------------------- #
+def is_frozen() -> bool:
+    """是不是 PyInstaller 打包版（没有仓库路径，也没有可跑的 python 脚本）。"""
+    return bool(getattr(sys, "frozen", False))
+
+
 def _fetch_script() -> str:
-    """生成抓取小工具：agent 不写代码也能用，想改就改。"""
+    """开发模式：生成抓取小工具（薄壳，实现在 app.agent.fetch_cli，源码可看可改）。"""
     return f'''#!/usr/bin/env python3
 """抓一个页面 → JSON（标题 / 正文 / 图片 / 链接）。用法：python fetch_page.py <url> [text_limit]"""
-import json
 import sys
 from pathlib import Path
 
 BACKEND = Path({str(BASE_DIR)!r})
 sys.path.insert(0, str(BACKEND))
 
-from app.agent.fetch import Fetcher  # noqa: E402
-from app.agent.page import (  # noqa: E402
-    extract_images,
-    extract_links,
-    extract_text,
-    page_title,
-    parse_html,
-)
-from app.config import settings  # noqa: E402
-
-
-def main() -> int:
-    if len(sys.argv) < 2:
-        print("用法: python fetch_page.py <url> [text_limit]", file=sys.stderr)
-        return 2
-    url = sys.argv[1]
-    limit = int(sys.argv[2]) if len(sys.argv) > 2 else {settings.agent_page_text_limit}
-    fetcher = Fetcher(settings)
-    try:
-        html = fetcher.get_html(url)
-    finally:
-        fetcher.close()
-    doc = parse_html(html)
-    payload = {{
-        "url": url,
-        "title": page_title(doc),
-        "text": extract_text(doc, limit=limit),
-        "images": [{{"url": image.url, "alt": image.alt}} for image in extract_images(doc, url)],
-        "links": [
-            {{"url": link.url, "text": link.text}}
-            for link in extract_links(doc, url, same_site_only=False)
-        ],
-    }}
-    print(json.dumps(payload, ensure_ascii=False, indent=1))
-    return 0
-
+from app.agent.fetch_cli import json_main  # noqa: E402
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(json_main(sys.argv[1:]))
 '''
 
 
 def _fetch_raw_script() -> str:
-    """抓原始 HTML 的小工具：正文被截断/要看原始结构时用，省得 agent 自己写请求。"""
+    """开发模式：抓原始 HTML 的小工具（薄壳，实现在 app.agent.fetch_cli）。"""
     return f'''#!/usr/bin/env python3
 """抓原始 HTML 存文件。用法：python fetch_raw_page.py <url> [out.html]"""
 import sys
@@ -144,33 +123,30 @@ from pathlib import Path
 BACKEND = Path({str(BASE_DIR)!r})
 sys.path.insert(0, str(BACKEND))
 
-from app.agent.fetch import Fetcher  # noqa: E402
-from app.config import settings  # noqa: E402
-
-
-def main() -> int:
-    if len(sys.argv) < 2:
-        print("用法: python fetch_raw_page.py <url> [out.html]", file=sys.stderr)
-        return 2
-    url = sys.argv[1]
-    out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("raw_page.html")
-    fetcher = Fetcher(settings)
-    try:
-        html = fetcher.get_html(url)
-    finally:
-        fetcher.close()
-    out.write_text(html, encoding="utf-8")
-    print(f"{{out}}（{{len(html)}} 字符）")
-    return 0
-
+from app.agent.fetch_cli import raw_main  # noqa: E402
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(raw_main(sys.argv[1:]))
 '''
 
 
 def _fetch_wrapper(workdir: Path, script: str = "fetch_page.py") -> str:
-    return "#!/bin/sh\n" f'exec "{sys.executable}" "{workdir / script}" "$@"\n'
+    return "#!/bin/sh\n" f'exec "{{sys.executable}}" "{{workdir / script}}" "$@"\n'
+
+
+def _frozen_wrappers(out_dir: Path) -> None:
+    """打包版：./fetch、./fetch_raw 直接转发给内置工具（同一个可执行文件 --fetch）。
+
+    dsh 在 unix 走 bash、Windows 走 pwsh/cmd，所以 sh 和 cmd 两种壳都写。
+    """
+    exe = Path(sys.executable)
+    for command, mode in (("fetch", "json"), ("fetch_raw", "raw")):
+        sh = out_dir / command
+        sh.write_text(f'#!/bin/sh\nexec "{exe}" --fetch {mode} "$@"\n', encoding="utf-8")
+        sh.chmod(0o755)
+        (out_dir / f"{command}.cmd").write_text(
+            f'@"{exe}" --fetch {mode} %*\r\n', encoding="utf-8"
+        )
 
 
 def _dsh_patch(model: str, thinking: str) -> str:
@@ -197,13 +173,16 @@ def _dsh_patch(model: str, thinking: str) -> str:
 
 def write_workdir(out_dir: Path, url: str, *, model: str, thinking: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    for script in ("fetch_page.py", "fetch_raw_page.py"):
-        source = _fetch_script() if script == "fetch_page.py" else _fetch_raw_script()
-        (out_dir / script).write_text(source, encoding="utf-8")
-    for command in ("fetch", "fetch_raw"):
-        wrapper = out_dir / command
-        wrapper.write_text(_fetch_wrapper(out_dir, f"{command}_page.py"), encoding="utf-8")
-        wrapper.chmod(0o755)
+    if is_frozen():
+        _frozen_wrappers(out_dir)
+    else:
+        for script in ("fetch_page.py", "fetch_raw_page.py"):
+            source = _fetch_script() if script == "fetch_page.py" else _fetch_raw_script()
+            (out_dir / script).write_text(source, encoding="utf-8")
+        for command in ("fetch", "fetch_raw"):
+            wrapper = out_dir / command
+            wrapper.write_text(_fetch_wrapper(out_dir, f"{command}_page.py"), encoding="utf-8")
+            wrapper.chmod(0o755)
     (out_dir / "TASK.md").write_text(
         f"# 商品抓取任务\n\n入口 URL：{url}\n\n{build_prompt(url)}\n",
         encoding="utf-8",

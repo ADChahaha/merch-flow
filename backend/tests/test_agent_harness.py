@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,21 @@ def test_write_workdir_thinking_off_disables_reasoning(tmp_path):
     assert "model: deepseek-v4-flash" in patch
     assert "thinking: disabled" in patch
     assert "reasoningEffort: off" in patch
+
+
+def test_frozen_mode_writes_exe_wrappers(tmp_path, monkeypatch):
+    """打包版：没有仓库脚本，./fetch 直接转发给内置工具（sh + cmd 两种壳）。"""
+    monkeypatch.setattr(harness_module, "is_frozen", lambda: True)
+    write_workdir(tmp_path, URL, model="deepseek-v4-flash", thinking="off")
+
+    assert not (tmp_path / "fetch_page.py").exists()
+    sh = (tmp_path / "fetch").read_text(encoding="utf-8")
+    assert "--fetch json" in sh and sys.executable in sh
+    cmd = (tmp_path / "fetch_raw.cmd").read_text(encoding="utf-8")
+    assert "--fetch raw" in cmd and sys.executable in cmd
+
+    prompt = build_prompt(URL, frozen=True)
+    assert "内置" in prompt and "sys.path" not in prompt
 
 
 def test_fetch_script_is_runnable_python(tmp_path):

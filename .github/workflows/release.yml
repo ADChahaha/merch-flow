@@ -1,0 +1,84 @@
+name: release
+
+# tag（v*）触发双端构建并发布到 GitHub Release；也可以手动跑一遍只验证构建。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14 # arm64 机型
+            artifact: mac-arm64
+          - os: windows-latest
+            artifact: win-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 装后端依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pyinstaller
+
+      - name: 冻后端（PyInstaller）
+        working-directory: backend
+        run: pyinstaller --noconfirm --clean merch-backend.spec
+
+      - name: 构建前端
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: 装桌面壳依赖
+        working-directory: desktop
+        run: npm ci
+
+      - name: 打包（macOS）
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        run: npx electron-builder --mac
+
+      - name: 打包（Windows）
+        if: runner.os == 'Windows'
+        working-directory: desktop
+        run: npx electron-builder --win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
