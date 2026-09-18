@@ -129,20 +129,24 @@ def _fetch_wrapper(workdir: Path) -> str:
 
 
 def _dsh_patch(model: str, thinking: str) -> str:
-    """per-run 覆盖：默认模型 + 思考/推理强度（off = 不开）。"""
+    """per-run 覆盖：默认模型 + 思考/推理强度（off = 真关掉）。
+
+    不写 llm-deepseek 这一段时，dsh 会用 provider 的默认推理强度（high）——
+    所以 off 也必须显式写出来，不然「关闭推理」等于没关，每步都在烧思考 token。
+    """
+    effort = (thinking or "off").strip().lower()
+    if effort not in {"off", "low", "high", "max"}:
+        effort = "off"
     lines = [
         "- id: agent-default-model",
         "  config:",
         "    provider: deepseek-official",
         f"    model: {model}",
+        "- id: llm-deepseek",
+        "  config:",
+        f"    thinking: {'disabled' if effort == 'off' else 'enabled'}",
+        f"    reasoningEffort: {effort}",
     ]
-    if thinking and thinking != "off":
-        lines += [
-            "- id: llm-deepseek",
-            "  config:",
-            "    thinking: enabled",
-            f"    reasoningEffort: {thinking}",
-        ]
     return "\n".join(lines) + "\n"
 
 

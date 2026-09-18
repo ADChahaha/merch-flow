@@ -68,11 +68,13 @@ def test_write_workdir_creates_tools_and_patch(tmp_path):
     assert "reasoningEffort: max" in patch
 
 
-def test_write_workdir_thinking_off_leaves_default(tmp_path):
+def test_write_workdir_thinking_off_disables_reasoning(tmp_path):
+    """off 必须显式禁用：不写这段时 dsh 默认 high，等于没关。"""
     write_workdir(tmp_path, URL, model="deepseek-v4-flash", thinking="off")
     patch = (tmp_path / "dsh.patch.yml").read_text(encoding="utf-8")
     assert "model: deepseek-v4-flash" in patch
-    assert "llm-deepseek" not in patch
+    assert "thinking: disabled" in patch
+    assert "reasoningEffort: off" in patch
 
 
 def test_fetch_script_is_runnable_python(tmp_path):
