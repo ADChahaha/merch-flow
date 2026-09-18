@@ -44,6 +44,37 @@ def test_summarize_update_shapes():
     assert summarize_update({"sessionUpdate": "agent_thought_chunk", "content": {"text": ""}}) is None
 
 
+def test_resolve_command_finds_npm_shim(monkeypatch):
+    """Windows 上 dsh 是 dsh.cmd，必须用 which 解析（CreateProcess 不认 PATHEXT）。"""
+    import app.agent.acp as acp_module
+
+    resolved = r"C:\\Users\\x\\AppData\\Roaming\\npm\\dsh.cmd"
+    monkeypatch.setattr(acp_module.shutil, "which", lambda name: resolved)
+    assert acp_module.resolve_command() == resolved
+
+    monkeypatch.setattr(acp_module.shutil, "which", lambda name: None)
+    assert acp_module.resolve_command() == "dsh"  # 兜底留原名，报错更直观
+
+
+def test_build_env_keeps_path_and_adds_node_locations(tmp_path, monkeypatch):
+    """Finder/开始菜单启动的 App PATH 很短：要给 dsh 补上 node 的常见安装位置。"""
+    import app.agent.acp as acp_module
+
+    fake_npm_bin = tmp_path / "npm-bin"
+    fake_npm_bin.mkdir()
+    monkeypatch.setattr(acp_module, "_node_paths", lambda: [fake_npm_bin])
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    env = acp_module.build_env("sk-test")
+
+    assert env["DEEPSEEK_API_KEY"] == "sk-test"
+    assert env["DSH_PERMISSION_MODE"] == "workspace-write"
+    parts = env["PATH"].split(os.pathsep)
+    assert parts[0] == str(Path(sys.executable).parent)  # venv 优先
+    assert parts[1:3] == ["/usr/bin", "/bin"]  # 原 PATH 保留
+    assert str(fake_npm_bin) in parts
+
+
 # --------------------------------------------------------------------------- #
 # 提示词与任务目录
 # --------------------------------------------------------------------------- #

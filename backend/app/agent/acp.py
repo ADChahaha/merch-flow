@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -29,6 +30,54 @@ class AcpError(RuntimeError):
 
 class AcpNotFound(AcpError):
     pass
+
+
+def _node_paths() -> list[Path]:
+    """dsh / node 常见的安装位置。
+
+    从 Finder / 开始菜单启动的 App 拿不到用户 shell 的 PATH（macOS 上只有
+    /usr/bin:/bin:/usr/sbin:/sbin），homebrew / npm 装的 dsh 就找不到了 —— 补兜底。
+    """
+    home = Path.home()
+    candidates = [
+        Path("/opt/homebrew/bin"),  # macOS Apple Silicon homebrew
+        Path("/usr/local/bin"),  # macOS Intel homebrew / 手动安装
+        Path("/opt/local/bin"),  # MacPorts
+        home / ".npm-global" / "bin",
+        home / ".local" / "bin",
+        home / "Library" / "pnpm",
+    ]
+    if os.name == "nt":
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / "npm")  # npm 全局 shim 在这
+        candidates.append(Path(r"C:\Program Files\nodejs"))
+    else:
+        nvm_bins = sorted((home / ".nvm" / "versions" / "node").glob("*/bin"))
+        candidates.extend(nvm_bins[-1:])  # nvm 装的 node，取最新的一个
+    return [path for path in candidates if path.is_dir()]
+
+
+def resolve_command(name: str = "dsh") -> str:
+    """解析 dsh 的完整路径。
+
+    Windows 上 npm 全局命令是 dsh.cmd（不是 .exe），CreateProcess 只自动补 .exe，
+    直接 Popen(["dsh"]) 会 FileNotFoundError —— shutil.which 会按 PATHEXT 找 .cmd。
+    找不到时返回原名，让 Popen 抛错、错误信息里能看到实际尝试的名字。
+    """
+    return shutil.which(name) or name
+
+
+def build_env(api_key: str = "") -> dict:
+    """dsh 子进程的环境：venv/bin 在最前，原 PATH 保留，再补 GUI 启动时缺的路径。"""
+    env = os.environ.copy()
+    if api_key:
+        env["DEEPSEEK_API_KEY"] = api_key
+    env.setdefault("DSH_PERMISSION_MODE", "workspace-write")
+    parts = [str(Path(sys.executable).parent), env.get("PATH", "")]
+    parts.extend(str(path) for path in _node_paths())
+    env["PATH"] = os.pathsep.join(part for part in parts if part)
+    return env
 
 
 def summarize_update(update: dict) -> dict | None:
@@ -82,16 +131,12 @@ class AcpClient:
         self.stop()
 
     def start(self) -> None:
-        cmd = ["dsh"]
+        cmd = [resolve_command()]
         if self.patch_path:
             cmd += ["--patch", self.patch_path]
         cmd += ["--profile", "acp"]
 
-        env = os.environ.copy()
-        if self.api_key:
-            env["DEEPSEEK_API_KEY"] = self.api_key
-        env.setdefault("DSH_PERMISSION_MODE", "workspace-write")
-        env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+        env = build_env(self.api_key)
 
         try:
             self.proc = subprocess.Popen(
