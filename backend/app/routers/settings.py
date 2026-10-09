@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from ..agent.env_store import mask_key, update_env_file
+from ..agent.env_store import ENV_LOCK, mask_key, update_env_file
 from ..config import settings
 from ..schemas import (
     AgentSettingsOut,
@@ -51,18 +51,19 @@ def get_settings() -> SettingsOut:
 @router.put("", response_model=SettingsOut)
 def update_settings(payload: SettingsUpdate) -> SettingsOut:
     updates: dict[str, str] = {}
+    changes = {}
 
     if payload.deepseek_api_key is not None:
         key = payload.deepseek_api_key.strip()
         updates["DEEPSEEK_API_KEY"] = key
-        settings.deepseek_api_key = key
+        changes["deepseek_api_key"] = key
 
     if payload.agent_model is not None and payload.agent_model.strip():
         model = payload.agent_model.strip()
         if model not in ALLOWED_MODELS:
             raise HTTPException(status_code=400, detail=f"模型只支持 {' / '.join(sorted(ALLOWED_MODELS))}")
         updates["EC_AGENT_MODEL"] = model
-        settings.agent_model = model
+        changes["agent_model"] = model
 
     if payload.agent_reasoning is not None:
         reasoning = payload.agent_reasoning.strip().lower()
@@ -71,28 +72,33 @@ def update_settings(payload: SettingsUpdate) -> SettingsOut:
                 status_code=400, detail=f"推理强度只支持 {' / '.join(sorted(ALLOWED_REASONING))}"
             )
         updates["EC_AGENT_REASONING"] = reasoning
-        settings.agent_reasoning = reasoning
+        changes["agent_reasoning"] = reasoning
 
     if payload.bilibili_access_token is not None:
         token = payload.bilibili_access_token.strip()
         updates["BILIBILI_ACCESS_TOKEN"] = token
-        settings.bilibili_access_token = token
+        changes["bilibili_access_token"] = token
 
     if payload.bilibili_client_id is not None:
         client_id = payload.bilibili_client_id.strip()
         updates["BILIBILI_CLIENT_ID"] = client_id
-        settings.bilibili_client_id = client_id
+        changes["bilibili_client_id"] = client_id
 
     if payload.bilibili_client_secret is not None:
         secret = payload.bilibili_client_secret.strip()
         updates["BILIBILI_CLIENT_SECRET"] = secret
-        settings.bilibili_client_secret = secret
+        changes["bilibili_client_secret"] = secret
 
     if payload.ui_source_open is not None:
         value = bool(payload.ui_source_open)
         updates["EC_UI_SOURCE_OPEN"] = "1" if value else "0"
-        settings.ui_source_open = value
+        changes["ui_source_open"] = value
 
+    if any("\n" in value or "\r" in value for value in updates.values()):
+        raise HTTPException(status_code=400, detail="设置值不能包含换行")
     if updates:
-        update_env_file(updates)
+        with ENV_LOCK:
+            update_env_file(updates)
+            for name, value in changes.items():
+                setattr(settings, name, value)
     return _out()

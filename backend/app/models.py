@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 from .domain.listing import utcnow
+
+
+class AgentJobSequence(Base):
+    """持久化任务号，删除记录后也不复用工作目录或 API 身份。"""
+    __tablename__ = "agent_job_sequence"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class AgentJob(Base):
@@ -53,11 +61,12 @@ class AgentProduct(Base):
     __tablename__ = "agent_products"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    uid: Mapped[str] = mapped_column(String(32), default=lambda: uuid4().hex, nullable=False)
     job_id: Mapped[int] = mapped_column(ForeignKey("agent_jobs.id", ondelete="CASCADE"), nullable=False)
     position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
     # 价格原文（西日本: "550円(税込)" / "$12.99"），站点怎么写就怎么留
     price_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # 发售日 / 举办日期等日期原文

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 
 from pydantic import BaseModel, Field
 
@@ -19,7 +20,7 @@ class AgentProductCreate(BaseModel):
     """手动添加一条商品（人工发现 AI 漏掉/需要补充的）。"""
 
     name: str = Field(min_length=1, max_length=500)
-    price: int | None = Field(default=None, ge=0)
+    price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     price_text: str = Field(default="", max_length=200)
     date_text: str = Field(default="", max_length=300)
     detail: str = Field(default="", max_length=2000)
@@ -37,7 +38,7 @@ class TaobaoPublishItem(BaseModel):
     """浏览器自动上架的一件商品（从上架清单来）。"""
 
     name: str = Field(min_length=1, max_length=500)
-    price: float | None = Field(default=None, ge=0)
+    price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     stock: int = Field(default=100, ge=0)
     images: list[str] = Field(default_factory=list)
     detail: str = ""
@@ -94,12 +95,21 @@ class SettingsUpdate(BaseModel):
     ui_source_open: bool | None = None
 
 
+def _safe_price(value):
+    try:
+        price = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return price if math.isfinite(price) and price >= 0 else None
+
+
 class AgentProductOut(BaseModel):
     """AI 抽出来的一条商品。id 在任务还在跑时是 None（还没落库）。"""
 
     id: int | None = None
+    uid: str = ""
     name: str
-    price: int | None = None
+    price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     price_text: str = ""
     date_text: str = ""
     detail: str = ""
@@ -110,8 +120,9 @@ class AgentProductOut(BaseModel):
     def of_live(cls, data: dict) -> "AgentProductOut":
         return cls(
             id=data.get("id"),
+            uid=str(data.get("uid") or ""),
             name=str(data.get("name") or ""),
-            price=data.get("price"),
+            price=_safe_price(data.get("price")),
             price_text=str(data.get("price_text") or ""),
             date_text=str(data.get("date_text") or ""),
             detail=str(data.get("detail") or ""),
@@ -123,8 +134,9 @@ class AgentProductOut(BaseModel):
     def of_row(cls, row: AgentProduct) -> "AgentProductOut":
         return cls(
             id=row.id,
+            uid=row.uid,
             name=row.name,
-            price=row.price,
+            price=_safe_price(row.price),
             price_text=row.price_text,
             date_text=row.date_text,
             detail=row.detail,

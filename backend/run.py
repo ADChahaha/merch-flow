@@ -25,6 +25,11 @@ def main() -> int:
 
         return fetch_main(sys.argv[2:])
 
+    if len(sys.argv) > 1 and sys.argv[1] == "--browser":
+        from app.agent.browser_cli import main as browser_main
+
+        return browser_main(sys.argv[2:])
+
     import uvicorn
 
     from app.main import app

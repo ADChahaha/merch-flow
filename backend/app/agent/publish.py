@@ -14,6 +14,10 @@
 from __future__ import annotations
 
 import json
+import shlex
+import sys
+
+from ..config import BASE_DIR
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
@@ -22,13 +26,13 @@ from pathlib import Path
 PUBLISH_PROMPT = """你是淘宝店铺上架 agent。任务：把工作目录 `publish_payload.json` 里的商品，通过**卖家中心网页**上架。
 
 工作目录里给了你工具：
-- `./chrome_debug.sh`：用专用 profile 启动带调试端口 9222 的 Chrome（会弹出窗口）。
+- `python browser.py launch`：用专用 profile 启动带调试端口 9222 的 Chrome（会弹出窗口）。
 - `browser.py`：CDP 挂接那个 Chrome 的工具（check / goto / shot / text / html / click / type / eval / wait）。
-  也可以直接写自己的 python（playwright 已装，用 `p.chromium.connect_over_cdp("http://127.0.0.1:9222")` 挂接）。
+  浏览器依赖由内置工具提供，优先使用该工具，不要假设外部 Python 已装 playwright。
 - `shots/`：截图统一放这里，每完成一小步截一张，供用户核对。
 
 上架实战要点（来自真实跑通过的流程，务必照做）：
-1. 先 `python browser.py check`。连不上就运行 `./chrome_debug.sh` 把 Chrome 打开，
+1. 先 `python browser.py check`。连不上就运行 `python browser.py launch` 把 Chrome 打开，
    然后**停下来提示用户扫码登录卖家中心**（这是必须真人的一步），登录完再继续。
 2. 直连类目 URL，别去点类目树：`https://item.upload.taobao.com/sell/v2/publish.htm?catId={类目ID}&fromAICategory=true`。
    payload 里没给 catId 时，先用浏览器搜一个同类商品/类目页拿到 catId，再直连。
@@ -59,162 +63,15 @@ def build_publish_prompt() -> str:
 # --------------------------------------------------------------------------- #
 # 工作目录
 # --------------------------------------------------------------------------- #
-def _chrome_script() -> str:
-    """独立 profile + 9222 启动 Chrome（macOS/Linux 通用）。"""
-    return """#!/bin/sh
-# 启动带调试端口的 Chrome（专用 profile，登录态长期保存）。已在跑就不用重复执行。
-PROFILE="${EC_TAOBAO_PROFILE:-$HOME/.ec-taobao-profile}"
-URL="https://myseller.taobao.com/"
-if curl -s --max-time 2 http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
-  echo "CDP 9222 已在运行"
-  exit 0
-fi
-for CHROME in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \\
-              "/Applications/Chromium.app/Contents/MacOS/Chromium" \\
-              "$(command -v google-chrome)" "$(command -v chromium)" "$(command -v chrome)"; do
-  if [ -n "$CHROME" ] && [ -x "$CHROME" ]; then
-    "$CHROME" --remote-debugging-port=9222 --user-data-dir="$PROFILE" --no-first-run "$URL" >/dev/null 2>&1 &
-    echo "已启动 Chrome（profile: $PROFILE）"
-    exit 0
-  fi
-done
-echo "找不到 Chrome，请手动执行：<chrome> --remote-debugging-port=9222 --user-data-dir=$PROFILE"
-exit 1
-"""
-
-
 def _browser_script() -> str:
-    """CDP 挂接工具：所有子命令都作用于同一个 Chrome，状态自然保持。"""
-    return '''#!/usr/bin/env python3
-"""淘宝上架浏览器工具：CDP 挂接 9222 上的 Chrome。
-
-用法：
-  python browser.py check                 # 端口/页面列表
-  python browser.py goto <url>            # 打开/复用页面
-  python browser.py shot <name>          # 截图到 shots/<name>.png
-  python browser.py text [max_chars]      # 当前页可见文本
-  python browser.py html [selector]       # 当前页/元素 HTML 摘要
-  python browser.py click <selector>
-  python browser.py type <selector> <text> [--enter]   # 真实键盘输入
-  python browser.py eval "<js>"
-  python browser.py wait <ms>
-"""
-import argparse
-import json
-import sys
-import time
-from pathlib import Path
-
-CDP = "http://127.0.0.1:9222"
-SHOTS = Path(__file__).parent / "shots"
-
-
-def fail(msg: str, code: int = 2):
-    print(json.dumps({"ok": False, "error": msg}, ensure_ascii=False))
-    sys.exit(code)
-
-
-def connect():
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        fail("playwright 没装：python -m playwright install chromium")
-    play = sync_playwright().start()
-    try:
-        browser = play.chromium.connect_over_cdp(CDP)
-    except Exception as exc:  # noqa: BLE001
-        play.stop()
-        fail(f"连不上 Chrome（{CDP}）：{exc}。先运行 ./chrome_debug.sh")
-    return play, browser
-
-
-def pick_page(browser, url_hint: str = ""):
-    contexts = browser.contexts
-    context = contexts[0] if contexts else browser.new_context()
-    pages = list(context.pages)
-    if url_hint:
-        for page in pages:
-            if url_hint in page.url:
-                return page
-    if pages:
-        return pages[-1]
-    return context.new_page()
-
-
-def out(payload: dict):
-    print(json.dumps(payload, ensure_ascii=False))
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("command")
-    parser.add_argument("args", nargs="*")
-    parser.add_argument("--enter", action="store_true")
-    options = parser.parse_args()
-    cmd, args = options.command, options.args
-
-    play, browser = connect()
-    try:
-        if cmd == "check":
-            context = browser.contexts[0] if browser.contexts else None
-            pages = [{"url": p.url, "title": p.title()} for p in (context.pages if context else [])]
-            out({"ok": True, "cdp": CDP, "pages": pages})
-            return 0
-
-        page = pick_page(browser, args[0] if cmd == "goto" and args else "")
-        page.bring_to_front()
-
-        if cmd == "goto":
-            page.goto(args[0], wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(1500)
-            out({"ok": True, "url": page.url, "title": page.title()})
-        elif cmd == "shot":
-            SHOTS.mkdir(exist_ok=True)
-            name = args[0] if args else f"shot-{int(time.time())}"
-            path = SHOTS / f"{name}.png"
-            page.screenshot(path=str(path), full_page=True)
-            out({"ok": True, "path": str(path)})
-        elif cmd == "text":
-            limit = int(args[0]) if args else 4000
-            body = page.evaluate("document.body ? document.body.innerText : ''")
-            out({"ok": True, "text": body[:limit]})
-        elif cmd == "html":
-            selector = args[0] if args else "body"
-            node = page.query_selector(selector)
-            if node is None:
-                fail(f"选择器没找到：{selector}")
-            html = node.evaluate("el => el.outerHTML")
-            out({"ok": True, "html": html[:4000]})
-        elif cmd == "click":
-            page.click(args[0], timeout=15000)
-            page.wait_for_timeout(800)
-            out({"ok": True, "clicked": args[0]})
-        elif cmd == "type":
-            # 真实键盘：click 聚焦 + keyboard.type（set value 在淘宝不生效）
-            text = args[1]
-            page.click(args[0], timeout=15000)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            page.keyboard.type(text, delay=60)
-            if options.enter:
-                page.keyboard.press("Enter")
-            page.wait_for_timeout(500)
-            out({"ok": True, "typed": text[:80]})
-        elif cmd == "eval":
-            out({"ok": True, "result": page.evaluate(args[0])})
-        elif cmd == "wait":
-            page.wait_for_timeout(int(args[0]))
-            out({"ok": True})
-        else:
-            fail(f"不认识命令：{cmd}")
-    finally:
-        play.stop()
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-'''
+    """脚本只分发到内置浏览器工具；打包版不要求外部 Python 安装 playwright。"""
+    if getattr(sys, "frozen", False):
+        return ("import subprocess, sys\n"
+                f"sys.exit(subprocess.call([{sys.executable!r}, '--browser', *sys.argv[1:]]))\n")
+    return ("import sys\n"
+            f"sys.path.insert(0, {str(BASE_DIR)!r})\n"
+            "from app.agent.browser_cli import main\n"
+            "sys.exit(main())\n")
 
 
 def write_publish_workdir(out_dir: Path, payload: dict) -> None:
@@ -224,7 +81,12 @@ def write_publish_workdir(out_dir: Path, payload: dict) -> None:
     )
     (out_dir / "browser.py").write_text(_browser_script(), encoding="utf-8")
     chrome = out_dir / "chrome_debug.sh"
-    chrome.write_text(_chrome_script(), encoding="utf-8")
+    command = ([sys.executable, "--browser", "launch"] if getattr(sys, "frozen", False)
+               else [sys.executable, str(out_dir / "browser.py"), "launch"])
+    chrome.write_text("#!/bin/sh\nexec " + shlex.join(command) + "\n", encoding="utf-8")
+    (out_dir / "chrome_debug.cmd").write_text(
+        "@" + " ".join('"' + part + '"' for part in command) + "\r\n", encoding="utf-8"
+    )
     chrome.chmod(0o755)
     (out_dir / "TASK.md").write_text(f"# 淘宝上架任务\n\n{PUBLISH_PROMPT}\n", encoding="utf-8")
 

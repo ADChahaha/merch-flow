@@ -72,11 +72,40 @@ def _ensure_columns() -> None:
                 conn.execute(text(f"ALTER TABLE agent_jobs ADD COLUMN {name} {ddl}"))
 
 
+    if "agent_products" in inspector.get_table_names():
+        from uuid import uuid4
+        product_columns = {column["name"] for column in inspector.get_columns("agent_products")}
+        with engine.begin() as conn:
+            if "uid" not in product_columns:
+                conn.execute(text("ALTER TABLE agent_products ADD COLUMN uid VARCHAR(32) NOT NULL DEFAULT ''"))
+            for product_id in conn.execute(text("SELECT id FROM agent_products WHERE uid = ''")).scalars().all():
+                conn.execute(text("UPDATE agent_products SET uid = :uid WHERE id = :id"),
+                             {"uid": uuid4().hex, "id": product_id})
+
+
 def init_db() -> None:
     from . import models  # noqa: F401  确保模型已注册
 
     Base.metadata.create_all(engine)
     _ensure_columns()
+
+    # 上次退出时未完成的任务已经没有 worker，不能永久停在 running。
+    from sqlalchemy import update, select, func
+    from .models import AgentJob, AgentJobSequence
+    from .domain.listing import utcnow
+    with engine.begin() as connection:
+        connection.execute(update(AgentJob).where(AgentJob.status == "running").values(
+            status="error", error="应用退出导致任务中断，可追问重试", finished_at=utcnow(),
+        ))
+
+    with Session(engine) as session:
+        maximum = session.scalar(select(func.max(AgentJob.id))) or 0
+        counter = session.get(AgentJobSequence, 1)
+        if counter is None:
+            session.add(AgentJobSequence(id=1, value=maximum))
+        else:
+            counter.value = max(counter.value, maximum)
+        session.commit()
 
     # 老任务（这个功能上线前跑的）从 dsh 会话日志里补 token 统计
     try:

@@ -31,7 +31,7 @@ export function agentSummaryOf(job: AgentJob | AgentJobSummary): AgentJobSummary
  */
 export function agentProductToOffer(product: AgentProduct, job: AgentJob | AgentJobSummary): Offer {
   return {
-    id: `agent:${job.id}:${product.id ?? product.name}`,
+    id: `agent:${job.id}:${product.uid || product.id || product.name}`,
     site_key: 'agent',
     site: 'AI 抓取',
     url: product.source_url || job.url,

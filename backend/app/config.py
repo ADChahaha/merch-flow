@@ -32,7 +32,7 @@ def _load_dotenv(path: Path) -> None:
 
 def _resolve_data_dir() -> Path:
     value = (os.getenv("EC_DATA_DIR") or "").strip()
-    return Path(value).expanduser() if value else BASE_DIR
+    return Path(value).expanduser().resolve() if value else BASE_DIR
 
 
 DATA_DIR = _resolve_data_dir()

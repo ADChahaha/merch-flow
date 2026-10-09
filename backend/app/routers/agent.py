@@ -38,8 +38,11 @@ def _job_workdir(job_id: int) -> Path:
 
 def _validate_url(raw: str) -> str:
     url = (raw or "").strip()
-    parts = urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.netloc:
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="URL 格式不正确") from exc
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
         raise HTTPException(status_code=400, detail="请输入完整的 http(s) URL")
     return url
 
@@ -97,7 +100,9 @@ def list_job_files(job_id: int, session: Session = Depends(get_session)) -> dict
 
 
 @router.get("/jobs/{job_id}/files/{name:path}")
-def get_job_file(job_id: int, name: str) -> FileResponse:
+def get_job_file(job_id: int, name: str, session: Session = Depends(get_session)) -> FileResponse:
+    if manager.get(job_id) is None and session.get(AgentJob, job_id) is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
     root = _job_workdir(job_id).resolve()
     target = (root / name).resolve()
     if not target.is_relative_to(root) or not target.is_file():
@@ -121,7 +126,11 @@ def add_job_product(job_id: int, payload: AgentProductCreate) -> AgentProductOut
 
 @router.delete("/jobs/{job_id}/products/{product_id}")
 def delete_job_product(job_id: int, product_id: int) -> dict:
-    if not manager.delete_product(job_id, product_id):
+    try:
+        deleted = manager.delete_product(job_id, product_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="商品不存在")
     return {"ok": True}
 

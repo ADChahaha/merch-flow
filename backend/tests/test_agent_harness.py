@@ -160,7 +160,7 @@ def test_normalize_product_cleans_fields():
         "https://shop.example.com/img/a.jpg",
         "https://cdn.example.com/b.jpg",
     ]
-    assert product["source_url"] == "/pd/x/"
+    assert product["source_url"] == "https://shop.example.com/pd/x/"
 
 
 def test_normalize_product_requires_name():
@@ -496,3 +496,29 @@ def test_cli_returns_failure_even_if_error_contains_products(tmp_path, monkeypat
         "products": [{"name": "old"}], "error": "API failed",
     })
     assert harness_module.main(["--url", URL, "--out", str(tmp_path)]) == 1
+
+
+@pytest.mark.parametrize('price,text,expected', [
+    (12.99, '$12.99', 12.99), ('12.99', '', 12.99), (None, '$12.99', 12.99),
+    (None, '4,400円(税込)', 4400), (None, '500円～700円', None),
+    (float('nan'), '', None), (float('inf'), '', None), (-10, '', None),
+])
+def test_product_price_keeps_decimals_and_rejects_ambiguous_values(price, text, expected):
+    assert normalize_product({'name': 'A', 'price': price, 'price_text': text}, URL)['price'] == expected
+
+
+def test_malformed_products_object_is_not_treated_as_empty_success(tmp_path):
+    (tmp_path / 'products.json').write_text('{"products": {"name": "A"}}')
+    with pytest.raises(ValueError, match='数组'):
+        read_products(tmp_path, URL)
+
+
+def test_single_image_string_does_not_become_character_urls():
+    product = normalize_product({'name': 'A', 'image_urls': 'https://example.com/image.jpg'}, URL)
+    assert product['image_urls'] == ['https://example.com/image.jpg']
+
+
+def test_invalid_nonempty_result_cannot_silently_clear_products(tmp_path):
+    (tmp_path / 'products.json').write_text('{"products":[{"price":10}]}')
+    with pytest.raises(ValueError, match='没有有效商品'):
+        read_products(tmp_path, URL)

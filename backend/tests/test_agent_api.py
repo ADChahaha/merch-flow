@@ -67,6 +67,11 @@ def _dump(event: dict) -> str:
 def agent_client(monkeypatch, tmp_path):
     import app.agent.jobs as jobs_module
     import app.main as main
+    from app.routers import agent, listings
+    manager = jobs_module.JobManager()
+    monkeypatch.setattr(jobs_module, "manager", manager)
+    monkeypatch.setattr(agent, "manager", manager)
+    monkeypatch.setattr(listings, "manager", manager)
     from app.db import Base, get_session
 
     # 用临时文件库而不是内存 StaticPool：后台的落库线程和断言线程要各自拿连接，
@@ -93,6 +98,7 @@ def agent_client(monkeypatch, tmp_path):
     # 任务目录跟着数据目录走（settings.data_dir 是共享实例，测试里挪到 tmp）
     monkeypatch.setattr(jobs_module.settings, "data_dir", tmp_path)
     monkeypatch.setattr(jobs_module.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(jobs_module, "kill_process_tree", lambda proc: None)
 
     main.app.dependency_overrides[get_session] = functools.partial(_session_gen, factory)
     FakePopen.lines = []
@@ -524,3 +530,186 @@ def test_successful_chat_can_explicitly_clear_products(agent_client):
     assert body["status"] == "done"
     assert body["products"] == []
     assert wait_persisted(factory, job_id)["products"] == []
+
+
+def test_followup_reorder_preserves_product_identity(agent_client):
+    client, _ = agent_client
+    products = [{"name": "A", "source_url": URL}, {"name": "B", "source_url": URL}]
+    FakePopen.lines = [{"type": "result", **RESULT, "products": products}]
+    job_id = client.post('/api/agent/jobs', json={"url": URL}).json()['id']
+    before = {p['name']: (p['id'], p['uid']) for p in wait_done(client, job_id)['products']}
+    FakePopen.lines = [{"type": "result", **RESULT, "products": products[::-1]}]
+    client.post(f'/api/agent/jobs/{job_id}/chat', json={"message": "reverse"})
+    after = wait_done(client, job_id)['products']
+    assert [p['name'] for p in after] == ['B', 'A']
+    assert {p['name']: (p['id'], p['uid']) for p in after} == before
+
+
+def test_deleted_product_identity_is_not_reused(agent_client):
+    client, _ = agent_client
+    FakePopen.lines = [{"type": "result", **RESULT}]
+    job_id = client.post('/api/agent/jobs', json={"url": URL}).json()['id']
+    old = wait_done(client, job_id)['products'][0]
+    client.delete(f'/api/agent/jobs/{job_id}/products/{old["id"]}')
+    new = client.post(f'/api/agent/jobs/{job_id}/products', json={"name": "new"}).json()
+    assert new['uid'] and new['uid'] != old['uid']
+
+
+def test_followup_receives_manual_edits_and_stable_ids(agent_client, tmp_path):
+    client, _ = agent_client
+    FakePopen.lines = [{"type": "result", **RESULT}]
+    job_id = client.post('/api/agent/jobs', json={"url": URL}).json()['id']
+    old = wait_done(client, job_id)['products'][0]
+    client.delete(f'/api/agent/jobs/{job_id}/products/{old["id"]}')
+    added = client.post(f'/api/agent/jobs/{job_id}/products', json={"name": "manual"}).json()
+    FakePopen.lines = [{"type": "result", "products": [], "error": "API failed"}]
+    client.post(f'/api/agent/jobs/{job_id}/chat', json={"message": "check"})
+    wait_done(client, job_id)
+    import app.agent.jobs as jobs
+    snapshot = json.loads((Path(jobs.settings.data_dir) / 'data' / 'agent_jobs' / str(job_id) / 'products.json').read_text())
+    assert len(snapshot['products']) == 1
+    assert snapshot['products'][0]['name'] == 'manual'
+    assert snapshot['products'][0]['uid'] == added['uid']
+
+
+def test_rejected_settings_do_not_change_live_values(agent_client, monkeypatch):
+    from app.config import settings
+    client, _ = agent_client
+    monkeypatch.setattr(settings, 'deepseek_api_key', 'original')
+    response = client.put('/api/settings', json={'deepseek_api_key': 'replacement', 'agent_model': 'invalid'})
+    assert response.status_code == 400
+    assert settings.deepseek_api_key == 'original'
+
+
+def test_settings_write_failure_does_not_change_live_values(agent_client, monkeypatch):
+    from app.config import settings
+    from app.routers import settings as router
+    client, _ = agent_client
+    monkeypatch.setattr(settings, 'deepseek_api_key', 'original')
+    def fail(*args):
+        raise OSError('disk unavailable')
+    monkeypatch.setattr(router, 'update_env_file', fail)
+    with pytest.raises(OSError):
+        client.put('/api/settings', json={'deepseek_api_key': 'replacement'})
+    assert settings.deepseek_api_key == 'original'
+
+
+def test_job_preparation_error_reaches_terminal_status(agent_client, monkeypatch):
+    from app.agent import jobs
+    client, factory = agent_client
+    def fail(*args, **kwargs):
+        raise OSError('cannot create directory')
+    monkeypatch.setattr(jobs.manager, '_execute', fail)
+    job_id = client.post('/api/agent/jobs', json={'url': URL}).json()['id']
+    result = wait_done(client, job_id)
+    assert result['status'] == 'error'
+    assert 'cannot create directory' in result['error']
+    assert wait_persisted(factory, job_id)['status'] == 'error'
+
+
+def test_harness_env_uses_current_settings_and_source_path(agent_client, monkeypatch):
+    from app.agent import jobs
+    from app.config import BASE_DIR
+    client, _ = agent_client
+    seen = {}
+    class InspectPopen(FakePopen):
+        def __init__(self, cmd, **kwargs):
+            seen.update(kwargs['env'])
+            super().__init__(cmd, **kwargs)
+    monkeypatch.setattr(jobs.subprocess, 'Popen', InspectPopen)
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'stale')
+    monkeypatch.setattr(jobs.settings, 'deepseek_api_key', '')
+    monkeypatch.setattr(jobs.settings, 'agent_model', 'deepseek-v4-pro')
+    job_id = client.post('/api/agent/jobs', json={'url': URL}).json()['id']
+    wait_done(client, job_id)
+    assert seen['DEEPSEEK_API_KEY'] == ''
+    assert seen['EC_AGENT_MODEL'] == 'deepseek-v4-pro'
+    assert str(BASE_DIR) in seen['PYTHONPATH']
+
+
+def test_decimal_product_price_survives_database_and_api(agent_client):
+    client, factory = agent_client
+    FakePopen.lines = [{"type": "result", **RESULT, 'products': [{**RESULT['products'][0], 'price': 12.99}]}]
+    job_id = client.post('/api/agent/jobs', json={'url': URL}).json()['id']
+    assert wait_done(client, job_id)['products'][0]['price'] == 12.99
+    assert wait_persisted(factory, job_id)['products'][0]['price'] == 12.99
+
+
+@pytest.mark.parametrize('url', ['http://[', 'http://:80'])
+def test_malformed_url_returns_client_error(agent_client, url):
+    client, _ = agent_client
+    assert client.post('/api/agent/jobs', json={'url': url}).status_code == 400
+
+
+def test_concurrent_followups_only_start_one_worker(agent_client, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app.agent import jobs
+    from app.models import AgentJob
+    client, factory = agent_client
+    FakePopen.lines = [{"type": "result", **RESULT}]
+    job_id = client.post('/api/agent/jobs', json={'url': URL}).json()['id']
+    wait_done(client, job_id)
+    release = threading.Event()
+    finished = threading.Event()
+    calls = []
+    def blocked(job_id, **kwargs):
+        calls.append(job_id)
+        release.wait(5)
+        jobs.manager._persist(jobs.manager.get(job_id), status='done')
+        finished.set()
+    monkeypatch.setattr(jobs.manager, '_execute', blocked)
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            responses = list(pool.map(lambda _: client.post(f'/api/agent/jobs/{job_id}/chat', json={'message': 'check'}), range(4)))
+        assert sorted(r.status_code for r in responses) == [200, 409, 409, 409]
+        with factory() as session:
+            assert session.get(AgentJob, job_id).status == 'running'
+    finally:
+        release.set()
+        assert finished.wait(5)
+    assert calls == [job_id]
+
+
+def test_stale_timeout_cannot_kill_new_turn():
+    from app.agent.jobs import JobManager, LiveJob
+    manager = JobManager()
+    manager._jobs[1] = LiveJob(id=1, url=URL)
+    old, current = object(), object()
+    manager._procs[1] = current
+    manager._on_timeout(1, old)
+    assert manager._jobs[1].error == ''
+    assert manager._procs[1] is current
+
+
+def test_deleted_job_does_not_reuse_id_or_stale_files(agent_client):
+    from app.agent import jobs
+    client, _ = agent_client
+    FakePopen.lines = [{"type": "result", **RESULT}]
+    first = client.post('/api/agent/jobs', json={'url': URL}).json()['id']
+    wait_done(client, first)
+    root = Path(jobs.settings.data_dir) / 'data' / 'agent_jobs' / str(first)
+    (root / 'old.png').write_bytes(b'old')
+    assert client.delete(f'/api/agent/jobs/{first}').status_code == 200
+    assert not root.exists()
+    second = client.post('/api/agent/jobs', json={'url': URL}).json()['id']
+    wait_done(client, second)
+    assert second > first
+    assert client.get(f'/api/agent/jobs/{first}/files/old.png').status_code == 404
+
+
+def test_legacy_negative_price_does_not_break_history_serialization():
+    from app.schemas import AgentProductOut
+    assert AgentProductOut.of_live({'name': 'legacy', 'price': -5}).price is None
+
+
+def test_new_job_discards_stale_pre_upgrade_workdir(agent_client):
+    from app.agent import jobs
+    client, _ = agent_client
+    root = Path(jobs.settings.data_dir) / 'data' / 'agent_jobs' / '1'
+    root.mkdir(parents=True)
+    (root / 'products.json').write_text('{"products":[{"name":"stale"}]}')
+    FakePopen.lines = [{"type": "result", **RESULT}]
+    job_id = client.post('/api/agent/jobs', json={'url': URL}).json()['id']
+    wait_done(client, job_id)
+    assert not (root / 'products.json').exists()

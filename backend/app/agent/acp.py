@@ -60,19 +60,21 @@ def _node_paths() -> list[Path]:
     return [path for path in candidates if path.is_dir()]
 
 
-def resolve_command(name: str = "dsh") -> str:
+def resolve_command(name: str = "dsh", *, path: str | None = None) -> str:
     """解析 dsh 的完整路径。
 
     Windows 上 npm 全局命令是 dsh.cmd（不是 .exe），CreateProcess 只自动补 .exe，
     直接 Popen(["dsh"]) 会 FileNotFoundError —— shutil.which 会按 PATHEXT 找 .cmd。
     找不到时返回原名，让 Popen 抛错、错误信息里能看到实际尝试的名字。
     """
-    return shutil.which(name) or name
+    return (shutil.which(name, path=path) if path is not None else shutil.which(name)) or name
 
 
 def build_env(api_key: str = "") -> dict:
     """dsh 子进程的环境：venv/bin 在最前，原 PATH 保留，再补 GUI 启动时缺的路径。"""
     env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     if api_key:
         env["DEEPSEEK_API_KEY"] = api_key
     env.setdefault("DSH_PERMISSION_MODE", "workspace-write")
@@ -123,6 +125,7 @@ class AcpClient:
         self._responses: dict[int, queue.Queue] = {}
         self._next_id = 0
         self._write_lock = threading.Lock()
+        self._closed_error: str | None = None
 
     # ------------------------------------------------------------------ #
     def __enter__(self) -> "AcpClient":
@@ -133,12 +136,12 @@ class AcpClient:
         self.stop()
 
     def start(self) -> None:
-        cmd = [resolve_command()]
+        env = build_env(self.api_key)
+        self._closed_error = None
+        cmd = [resolve_command(path=env["PATH"])]
         if self.patch_path:
             cmd += ["--patch", self.patch_path]
         cmd += ["--profile", "acp"]
-
-        env = build_env(self.api_key)
 
         try:
             self.proc = subprocess.Popen(
@@ -148,6 +151,8 @@ class AcpClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=env,
                 start_new_session=True,
@@ -155,8 +160,8 @@ class AcpClient:
         except FileNotFoundError as exc:
             raise AcpNotFound("找不到 dsh：npm install -g @deepseek-ai/dsh") from exc
 
-        threading.Thread(target=self._read_stdout, name="acp-stdout", daemon=True).start()
-        threading.Thread(target=self._drain_stderr, name="acp-stderr", daemon=True).start()
+        threading.Thread(target=self._read_stdout, args=(self.proc,), name="acp-stdout", daemon=True).start()
+        threading.Thread(target=self._drain_stderr, args=(self.proc,), name="acp-stderr", daemon=True).start()
 
     def stop(self) -> None:
         proc, self.proc = self.proc, None
@@ -172,20 +177,22 @@ class AcpClient:
 
     # ------------------------------------------------------------------ #
     def _send(self, method: str, params: dict):
-        if self.proc is None or self.proc.stdin is None:
-            raise AcpError("ACP 进程没起来")
         with self._write_lock:
+            if self._closed_error:
+                raise AcpError(self._closed_error)
+            if self.proc is None or self.proc.stdin is None:
+                raise AcpError("ACP 进程没起来")
             self._next_id += 1
             message_id = self._next_id
-        box: queue.Queue = queue.Queue()
-        self._responses[message_id] = box
-        payload = {"jsonrpc": "2.0", "id": message_id, "method": method, "params": params}
-        try:
-            self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            self.proc.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            self._responses.pop(message_id, None)
-            raise AcpError(f"ACP 进程已断开：{exc}") from exc
+            box: queue.Queue = queue.Queue()
+            self._responses[message_id] = box
+            payload = {"jsonrpc": "2.0", "id": message_id, "method": method, "params": params}
+            try:
+                self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                self.proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as exc:
+                self._responses.pop(message_id, None)
+                raise AcpError(f"ACP 进程已断开：{exc}") from exc
         try:
             response = box.get(timeout=self.timeout)
         except queue.Empty as exc:
@@ -208,37 +215,41 @@ class AcpClient:
             except (BrokenPipeError, OSError):
                 pass
 
-    def _read_stdout(self) -> None:
-        assert self.proc is not None and self.proc.stdout is not None
-        for line in self.proc.stdout:
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                message = json.loads(text)
-            except json.JSONDecodeError:
-                self.on_event("noise", text)
-                continue
+    def _read_stdout(self, proc) -> None:
+        try:
+            for line in proc.stdout:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    message = json.loads(text)
+                except json.JSONDecodeError:
+                    self.on_event("noise", text)
+                    continue
+                if not isinstance(message, dict):
+                    self.on_event("noise", text)
+                    continue
+                if "result" in message or "error" in message:
+                    box = self._responses.get(message.get("id"))
+                    if box is not None:
+                        box.put(message)
+                    continue
+                method = message.get("method")
+                if method == "session/update":
+                    self.on_event("update", message.get("params") or {})
+                elif method == "session/request_permission":
+                    self._answer_permission(message)
+                elif method:
+                    self._reply(message.get("id"), {})
+        finally:
+            # dsh 崩溃/提前退出时立即唤醒请求，不能让用户空等默认 900 秒。
+            with self._write_lock:
+                self._closed_error = "ACP 进程已断开"
+                for box in list(self._responses.values()):
+                    box.put({"error": self._closed_error})
 
-            if "result" in message or "error" in message:
-                box = self._responses.get(message.get("id"))
-                if box is not None:
-                    box.put(message)
-                continue
-
-            method = message.get("method")
-            if method == "session/update":
-                self.on_event("update", message.get("params") or {})
-            elif method == "session/request_permission":
-                self._answer_permission(message)
-            elif method:
-                # 其他 agent→client 请求：当前不需要，空回避免它卡住
-                self._reply(message.get("id"), {})
-
-    def _drain_stderr(self) -> None:
-        if self.proc is None or self.proc.stderr is None:
-            return
-        for line in self.proc.stderr:
+    def _drain_stderr(self, proc) -> None:
+        for line in proc.stderr:
             text = line.rstrip("\n")
             if text:
                 self.on_event("stderr", text)

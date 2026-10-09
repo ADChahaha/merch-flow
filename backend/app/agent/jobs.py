@@ -10,20 +10,23 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
 import time
+from functools import wraps
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from ..config import settings
+from ..config import BASE_DIR, settings
 from ..db import session_scope
 from ..domain.listing import utcnow
-from ..models import AgentJob, AgentProduct
+from ..models import AgentJob, AgentProduct, AgentJobSequence
 from .tokens import read_session_usage
 from .processes import kill_process_tree
+from .products import match_product
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,7 @@ class LiveJob:
     usage: dict = field(default_factory=dict)
     log: list[dict] = field(default_factory=list)
     products: list[dict] = field(default_factory=list)
+    pending_products: list[dict] | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -68,13 +72,23 @@ class LiveJob:
         }
 
 
+def synchronized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return call
+
+
 class JobManager:
     def __init__(self) -> None:
         self._jobs: dict[int, LiveJob] = {}
         self._procs: dict[int, subprocess.Popen] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._shutting_down = False
 
     # ------------------------------------------------------------------ #
+    @synchronized
     def start(
         self,
         url: str,
@@ -83,8 +97,15 @@ class JobManager:
         payload: dict | None = None,
         extra: str | None = None,
     ) -> LiveJob:
+        from sqlalchemy import select, func
         with session_scope() as session:
-            job = AgentJob(url=url, kind=kind, status="running", log=[])
+            maximum = session.scalar(select(func.max(AgentJob.id))) or 0
+            counter = session.get(AgentJobSequence, 1)
+            if counter is None:
+                counter = AgentJobSequence(id=1, value=maximum)
+                session.add(counter)
+            counter.value = max(counter.value, maximum) + 1
+            job = AgentJob(id=counter.value, url=url, kind=kind, status="running", log=[])
             session.add(job)
             session.flush()
             job_id = job.id
@@ -133,6 +154,7 @@ class JobManager:
                 products=[
                     {
                         "id": row.id,
+                        "uid": row.uid,
                         "name": row.name,
                         "price": row.price,
                         "price_text": row.price_text,
@@ -148,6 +170,7 @@ class JobManager:
             self._jobs[job_id] = live
         return live
 
+    @synchronized
     def add_product(self, job_id: int, data: dict) -> dict | None:
         """手动添加一条商品（人工对比原始页面后补 AI 的漏）。"""
         live = self.get(job_id) or self._restore(job_id)
@@ -175,9 +198,11 @@ class JobManager:
             session.add(row)
             session.flush()
             product_id = row.id
+            product_uid = row.uid
 
         product = {
             "id": product_id,
+            "uid": product_uid,
             "name": data.get("name") or "",
             "price": data.get("price"),
             "price_text": data.get("price_text") or "",
@@ -189,8 +214,12 @@ class JobManager:
         live.products.append(product)
         return product
 
+    @synchronized
     def delete_product(self, job_id: int, product_id: int) -> bool:
         """删掉一条商品（手动加错了、或人工确认是误抓）。"""
+        live = self.get(job_id)
+        if live is not None and live.status == "running":
+            raise RuntimeError("任务进行中，跑完再删除商品")
         with session_scope() as session:
             row = session.get(AgentProduct, product_id)
             if row is None or row.job_id != job_id:
@@ -202,6 +231,7 @@ class JobManager:
             live.products = [item for item in live.products if item.get("id") != product_id]
         return True
 
+    @synchronized
     def chat(self, job_id: int, message: str) -> LiveJob | None:
         """用户在同一个任务上追问：续聊原来的 dsh 会话，让它继续改 products.json。"""
         live = self.get(job_id) or self._restore(job_id)
@@ -209,8 +239,16 @@ class JobManager:
             return None
         if live.status == "running":
             raise RuntimeError("任务还在跑，等它结束再追问")
+        with session_scope() as session:
+            row = session.get(AgentJob, job_id)
+            if row is None:
+                return None
+            row.status = "running"
+            row.error = ""
+            row.finished_at = None
         live.status = "running"
         live.error = ""
+        live.pending_products = None
         self._append_log(live, "user", message)
         thread = threading.Thread(
             target=self._run,
@@ -222,6 +260,7 @@ class JobManager:
         thread.start()
         return live
 
+    @synchronized
     def delete(self, job_id: int) -> bool:
         """删任务：跑着就先杀，然后连同落库的商品一起删。"""
         with self._lock:
@@ -234,10 +273,17 @@ class JobManager:
             if job is None:
                 return False
             session.delete(job)
+        try:
+            shutil.rmtree(Path(settings.data_dir) / "data" / "agent_jobs" / str(job_id))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("任务 %s 的缓存文件暂时无法删除", job_id, exc_info=True)
         return True
 
     def shutdown(self) -> None:
         with self._lock:
+            self._shutting_down = True
             ids = list(self._procs)
         for job_id in ids:
             self._kill(job_id)
@@ -246,7 +292,7 @@ class JobManager:
     def _kill(self, job_id: int) -> None:
         with self._lock:
             proc = self._procs.get(job_id)
-        if proc is None or proc.poll() is not None:
+        if proc is None:
             return
         kill_process_tree(proc)
 
@@ -266,18 +312,35 @@ class JobManager:
         elif kind == "result":
             # 失败结果通常带空 products；保留上一轮已确认的数据。
             if not event.get("error"):
-                live.products = list(event.get("products") or [])
+                live.pending_products = list(event.get("products") or [])
             live.pages_visited = max(live.pages_visited, int(event.get("pages_visited") or 0))
             live.title = str(event.get("title") or live.title)
             live.agent_session = str(event.get("session_id") or live.agent_session)
             live.reply = str(event.get("reply") or live.reply)
-            if isinstance(event.get("usage"), dict):
+            if isinstance(event.get("usage"), dict) and event["usage"]:
                 live.usage = dict(event["usage"])
             if event.get("error"):
                 live.error = str(event["error"])
 
     # ------------------------------------------------------------------ #
-    def _run(
+    def _run(self, job_id: int, **kwargs) -> None:
+        try:
+            self._execute(job_id, **kwargs)
+        except Exception as exc:  # 工作目录、进程准备和清理异常也必须结束任务。
+            logger.exception("任务 %s 执行失败", job_id)
+            try:
+                self._kill(job_id)
+            except Exception:
+                logger.exception("任务 %s 清理失败", job_id)
+            with self._lock:
+                self._procs.pop(job_id, None)
+            live = self.get(job_id)
+            if live is not None:
+                live.error = f"任务异常：{exc}"
+                self._append_log(live, "error", live.error)
+                self._persist(live, status="error")
+
+    def _execute(
         self,
         job_id: int,
         *,
@@ -291,6 +354,9 @@ class JobManager:
             return
 
         out_dir = Path(settings.data_dir) / "data" / "agent_jobs" / str(job_id)
+        if not resume and out_dir.exists():
+            # 兼容旧版本留下的同号缓存，首轮必须从空目录开始。
+            shutil.rmtree(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # 打包版（PyInstaller）：sys.executable 是后端本体，用 --harness 分发到同一份代码
@@ -311,6 +377,12 @@ class JobManager:
             payload_path = out_dir / "payload.json"
             payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             cmd += ["--payload", str(payload_path)]
+        if resume and live.kind == "scrape":
+            # 数据库是已确认结果；覆盖失败输出，并带上人工增删与稳定身份。
+            (out_dir / "products.json").write_text(
+                json.dumps({"title": live.title, "products": live.products}, ensure_ascii=False),
+                encoding="utf-8",
+            )
         if resume and live.agent_session:
             cmd += ["--resume", live.agent_session]
         if prompt:
@@ -319,8 +391,13 @@ class JobManager:
             cmd += ["--extra", extra.strip()]
 
         env = os.environ.copy()
-        if settings.deepseek_api_key:
-            env["DEEPSEEK_API_KEY"] = settings.deepseek_api_key
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["DEEPSEEK_API_KEY"] = settings.deepseek_api_key
+        env["EC_AGENT_MODEL"] = settings.agent_model
+        env["EC_AGENT_REASONING"] = settings.agent_reasoning
+        if not getattr(sys, "frozen", False):
+            env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(BASE_DIR), env.get("PYTHONPATH", "")]))
         if not env.get("DEEPSEEK_API_KEY"):
             self._append_log(
                 live, "error", "没有 DEEPSEEK_API_KEY：在「设置 → AI 抓取」里填上再重试"
@@ -332,12 +409,16 @@ class JobManager:
                 # 删除与启动互斥，防止用户点删除后才注册出一个孤儿进程。
                 if self._jobs.get(job_id) is not live:
                     return
+                if self._shutting_down:
+                    raise RuntimeError("应用正在退出")
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(settings.data_dir),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                     env=env,
                     # 与桌面壳隔离；清理时遍历整个进程树，包括独立的 dsh 进程组
@@ -350,7 +431,7 @@ class JobManager:
             self._persist(live, status="error")
             return
 
-        timer = threading.Timer(settings.agent_total_timeout, self._on_timeout, args=(job_id,))
+        timer = threading.Timer(settings.agent_total_timeout, self._on_timeout, args=(job_id, proc))
         timer.daemon = True
         timer.start()
 
@@ -384,7 +465,10 @@ class JobManager:
             self._append_log(live, "info", f"任务结束（{elapsed:.1f}s，状态 {final_status}）")
             self._persist(live, status=final_status)
 
-    def _on_timeout(self, job_id: int) -> None:
+    @synchronized
+    def _on_timeout(self, job_id: int, proc=None) -> None:
+        if proc is not None and self._procs.get(job_id) is not proc:
+            return
         live = self.get(job_id)
         if live is None or live.status != "running":
             return
@@ -392,8 +476,9 @@ class JobManager:
         self._append_log(live, "error", live.error)
         self._kill(job_id)
 
+    @synchronized
     def _persist(self, live: LiveJob, *, status: str | None = None) -> None:
-        final_status = status or live.status
+        final_status = "error" if live.error else (status or live.status)
         try:
             with session_scope() as session:
                 job = session.get(AgentJob, live.id)
@@ -408,15 +493,12 @@ class JobManager:
                 job.usage = live.usage or {}
                 job.log = live.log[-MAX_LOG_LINES:]
                 job.finished_at = utcnow()
-                existing = {row.id: row for row in job.products}
-                retained = {product.get("id") for product in live.products}
-                for product_id, row in existing.items():
-                    if product_id not in retained:
-                        session.delete(row)
-                session.flush()
+                available = {row.uid: row for row in job.products}
+                products = (live.pending_products if final_status == "done" and live.pending_products is not None
+                            else live.products)
                 saved = []
-                for position, product in enumerate(live.products):
-                    row = existing.get(product.get("id"))
+                for position, product in enumerate(products):
+                    row = match_product(product, available)
                     if row is None:
                         row = AgentProduct(job_id=live.id)
                         session.add(row)
@@ -429,9 +511,12 @@ class JobManager:
                     row.image_urls = list(product.get("image_urls") or [])
                     row.source_url = str(product.get("source_url") or "")[:2000]
                     session.flush()
-                    saved.append({**product, "id": row.id})
+                    saved.append({**product, "id": row.id, "uid": row.uid})
+                for row in available.values():
+                    session.delete(row)
             # 提交成功后才结束轮询，确保用户能立即删除刚抓到的商品。
             live.products = saved
+            live.pending_products = None
             live.status = final_status
         except Exception:  # noqa: BLE001
             logger.exception("AI 抓取任务 %s 落库失败", live.id)

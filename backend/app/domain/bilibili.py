@@ -131,6 +131,26 @@ class ProductAddRequest(BaseModel):
             problems.append(
                 f"SKU 数量（{len(self.spec_prices)}）必须等于规格组合数（{combos}）"
             )
+        groups = self.spec_info.spec_values
+        names = [group.property_name for group in groups]
+        if len(set(names)) != len(names):
+            problems.append("规格项名称不能重复")
+        allowed = {group.property_name: {value.value_name for value in group.values} for group in groups}
+        for group in groups:
+            if len(allowed[group.property_name]) != len(group.values):
+                problems.append(f"规格 {group.property_name} 的值不能重复")
+        seen = set()
+        for index, sku in enumerate(self.spec_prices, start=1):
+            properties = {value.property_name: value.value_name for value in sku.sell_properties}
+            if len(properties) != len(sku.sell_properties) or set(properties) != set(allowed):
+                problems.append(f"第 {index} 个 SKU 必须包含且仅包含每个规格项一次")
+                continue
+            if any(value not in allowed[name] for name, value in properties.items()):
+                problems.append(f"第 {index} 个 SKU 含未声明的规格值")
+            combination = tuple(sorted(properties.items()))
+            if combination in seen:
+                problems.append(f"第 {index} 个 SKU 的规格组合重复")
+            seen.add(combination)
         if self.operate_status == 1 and not self.scheduled_on_shelf_time:
             problems.append("定时上架（operate_status=1）必须传 scheduled_on_shelf_time")
         if self.presell_type == 0 and self.delivery_delay_day is None:

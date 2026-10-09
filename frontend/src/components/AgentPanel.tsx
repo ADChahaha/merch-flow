@@ -92,6 +92,8 @@ export function AgentPanel({
       })
       setForm({ name: '', price: '', priceText: '', dateText: '', detail: '', images: '', sourceUrl: '' })
       setAddOpen(false)
+    } catch {
+      // 父组件显示错误；保留输入，方便重试。
     } finally {
       setSaving(false)
     }
@@ -193,7 +195,7 @@ export function AgentPanel({
         </div>
       )}
 
-      {agentJob && agentOffers.length > 0 && (
+      {agentJob && agentJob.kind !== 'taobao_publish' && (
         <div className="flex items-center gap-2 px-5 pt-1.5 pb-1 text-[11px] text-slate-400">
           <span>
             共 {agentOffers.length} 件 · 已加入上架清单 {inCartCount}
@@ -242,8 +244,11 @@ export function AgentPanel({
               className="col-span-2 rounded-md border border-slate-200 px-2.5 py-1.5 text-[12px] outline-none focus:border-brand-500"
             />
             <input
+              type="number"
+              min="0"
+              step="0.01"
               value={form.price}
-              onChange={(e) => patchForm({ price: e.target.value.replace(/\D/g, '') })}
+              onChange={(e) => patchForm({ price: e.target.value })}
               placeholder="价格（数字，可选）"
               className="rounded-md border border-slate-200 px-2.5 py-1.5 text-[12px] outline-none focus:border-brand-500"
             />

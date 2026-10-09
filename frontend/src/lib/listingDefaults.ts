@@ -130,6 +130,7 @@ export function buildForm(
     .join(' / ')
     .slice(0, 200)
 
+  const skuNames = items.map(skuName)
   return {
     name: name.slice(0, NAME_MAX),
     categoryLeafId: options.categoryLeafId,
@@ -144,7 +145,8 @@ export function buildForm(
     skus: items.map((item, index) => ({
       key: `${item.id}-${index}`,
       itemId: item.id,
-      name: skuName(item, index),
+      name: skuNames.filter((name) => name === skuNames[index]).length > 1
+        ? `${skuNames[index]} (${index + 1})` : skuNames[index],
       priceYuan: item.price === null ? '' : String(item.price),
       stock: '100',
       reserveStart,
@@ -164,7 +166,7 @@ export function buildForm(
 export function toProductAddRequest(form: ListingForm, commit: boolean) {
   const specName = '款式'
   const values = form.skus.map((sku) => ({ value_name: sku.name }))
-  const carousel = form.carousel.filter(Boolean)
+  const carousel = [...new Set([form.mainImage, ...form.carousel].filter(Boolean))]
   // 接口硬限制：pic 最多 5 张。超出的自动挪到详情图，别丢
   const pic = carousel.slice(0, MAX_CAROUSEL)
   const overflow = carousel.slice(MAX_CAROUSEL)
@@ -213,9 +215,10 @@ export function validateForm(form: ListingForm): string[] {
   if (form.skus.length === 0) problems.push('至少添加一个 SKU')
   form.skus.forEach((sku, index) => {
     if (!sku.name.trim()) problems.push(`第 ${index + 1} 个 SKU 缺名称`)
-    if (!sku.priceYuan || Number(sku.priceYuan) <= 0) problems.push(`第 ${index + 1} 个 SKU 缺售价`)
-    if (sku.stock === '' || Number(sku.stock) < 0) problems.push(`第 ${index + 1} 个 SKU 缺库存`)
+    if (!sku.priceYuan || !Number.isFinite(Number(sku.priceYuan)) || Number(sku.priceYuan) <= 0) problems.push(`第 ${index + 1} 个 SKU 缺售价`)
+    if (sku.stock === '' || !Number.isInteger(Number(sku.stock)) || Number(sku.stock) < 0) problems.push(`第 ${index + 1} 个 SKU 缺库存`)
   })
+  if (new Set(form.skus.map((sku) => sku.name.trim())).size !== form.skus.length) problems.push('SKU 名称不能重复')
   if (!form.shippingNote.trim()) problems.push('请填写发货说明')
   if (!form.purchaseNote.trim()) problems.push('请填写购买须知')
   return problems

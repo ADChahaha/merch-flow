@@ -38,6 +38,7 @@ export type Offer = {
 
 /** AI 抓取（deepseek harness）：一条抽出来的商品 */
 export type AgentProduct = {
+  uid: string
   id: number | null
   name: string
   price: number | null

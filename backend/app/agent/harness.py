@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shlex
 import sys
@@ -67,7 +68,8 @@ PROMPT_TEMPLATE = """你是电商商品抓取 agent。任务：从 {url} 出发�
     }}
   ]
 }}
-4. 写完自查一遍 products.json 是合法 JSON，然后回复一句话总结（找到多少件商品）。"""
+4. 续聊时保留已有商品的 uid 字段，新商品不填 uid。不要将旧商品的 uid 分配给其他商品。
+5. 写完自查一遍 products.json 是合法 JSON，然后回复一句话总结（找到多少件商品）。"""
 
 
 # 开发（源码运行）：工具是 python 脚本，仓库代码可复用、可 import
@@ -199,16 +201,25 @@ def _clean_text(value: object, limit: int = 2000) -> str:
     return re.sub(r"\s+", " ", text).strip()[:limit]
 
 
-def _parse_int(price: object, price_text: str) -> int | None:
+def _parse_price(price: object, price_text: str) -> float | None:
     if isinstance(price, bool):
         return None
     if isinstance(price, (int, float)):
-        return int(price)
-    digits = re.sub(r"[^\d]", "", str(price or ""))
-    if digits:
-        return int(digits)
-    digits = re.sub(r"[^\d]", "", price_text or "")
-    return int(digits) if digits else None
+        try:
+            value = float(price)
+        except OverflowError:
+            return None
+        return value if math.isfinite(value) and value >= 0 else None
+    text = _clean_text(price if price is not None and price != "" else price_text)
+    numbers = re.findall(r"-?\d+(?:,\d{3})*(?:\.\d+)?", text)
+    # 区间价/多个报价不能拼成一个错误的金额，保留原文供人工核对。
+    if len(numbers) != 1:
+        return None
+    try:
+        value = float(numbers[0].replace(",", ""))
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
 
 
 def normalize_product(raw: object, page_url: str = "") -> dict | None:
@@ -220,7 +231,12 @@ def normalize_product(raw: object, page_url: str = "") -> dict | None:
 
     price_text = _clean_text(raw.get("price_text"), limit=200)
     images: list[str] = []
-    for value in raw.get("image_urls") or []:
+    image_values = raw.get("image_urls") or []
+    if isinstance(image_values, str):
+        image_values = [image_values]
+    elif not isinstance(image_values, list):
+        image_values = []
+    for value in image_values:
         url = _clean_text(value, limit=2000)
         if not url:
             continue
@@ -229,12 +245,12 @@ def normalize_product(raw: object, page_url: str = "") -> dict | None:
             images.append(url)
 
     source_url = _clean_text(raw.get("source_url"), limit=2000)
-    if not source_url and page_url:
-        source_url = page_url
+    source_url = urljoin(page_url, source_url) if page_url else source_url
 
     return {
+        "uid": _clean_text(raw.get("uid"), limit=32),
         "name": name,
-        "price": _parse_int(raw.get("price"), price_text),
+        "price": _parse_price(raw.get("price"), price_text),
         "price_text": price_text,
         "date_text": _clean_text(raw.get("date_text"), limit=300),
         "detail": _clean_text(raw.get("detail"), limit=2000),
@@ -259,10 +275,15 @@ def read_products(out_dir: Path, entry_url: str) -> tuple[str, list[dict]]:
         raise ValueError("products.json 顶层应该是对象")
 
     products: list[dict] = []
-    for raw in data.get("products") or []:
+    raw_products = data.get("products")
+    if not isinstance(raw_products, list):
+        raise ValueError("products.json 的 products 必须是数组")
+    for raw in raw_products:
         product = normalize_product(raw, entry_url)
         if product is not None:
             products.append(product)
+    if raw_products and not products:
+        raise ValueError("products.json 没有有效商品：商品必须包含名称")
     return _clean_text(data.get("title"), limit=300), products
 
 

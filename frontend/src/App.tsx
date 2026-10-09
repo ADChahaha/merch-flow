@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { AgentJobList } from './components/AgentJobList'
 import { AgentLogPanel } from './components/AgentLogPanel'
@@ -36,9 +36,16 @@ export default function App() {
   const [agentExtra, setAgentExtra] = useState('')
   const [agentBusy, setAgentBusy] = useState(false)
   const [agentJobs, setAgentJobs] = useState<AgentJobSummary[]>([])
+  const jobsRevision = useRef(0)
   const [jobsLoading, setJobsLoading] = useState(true)
   const [activeJobId, setActiveJobId] = useState<number | null>(null)
   const [activeJob, setActiveJob] = useState<AgentJob | null>(null)
+  const selection = useRef(0)
+  const activateJob = (id: number | null) => {
+    selection.current += 1
+    setActiveJobId(id)
+    return selection.current
+  }
   const [logOpen, setLogOpen] = useState(false)
   /** 停在「新建会话」页：中间只显示 URL 输入 */
   const [draft, setDraft] = useState(false)
@@ -48,6 +55,7 @@ export default function App() {
   const toggleSource = () => setSourceOpen((prev) => !prev)
 
   useEffect(() => {
+    const revision = jobsRevision.current
     void (async () => {
       try {
         const [categoryInfo, freightInfo, jobList, appSettings] = await Promise.all([
@@ -59,10 +67,12 @@ export default function App() {
         setCategories(categoryInfo.tree)
         setFreights(freightInfo.templates)
         setSourceOpen(appSettings.ui.source_open)
-        setAgentJobs(jobList)
+        if (revision === jobsRevision.current) setAgentJobs(jobList)
+        if (selection.current !== 0) return
         if (jobList[0]) {
-          setActiveJobId(jobList[0].id)
-          setActiveJob(await api.agentJob(jobList[0].id))
+          const token = activateJob(jobList[0].id)
+          const job = await api.agentJob(jobList[0].id)
+          if (token === selection.current) setActiveJob(job)
         } else {
           setDraft(true) // 一条记录都没有：直接停在新建会话页
         }
@@ -75,8 +85,10 @@ export default function App() {
   }, [])
 
   const refreshAgentJobs = async () => {
+    const revision = jobsRevision.current
     try {
-      setAgentJobs(await api.agentJobs())
+      const jobs = await api.agentJobs()
+      if (revision === jobsRevision.current) setAgentJobs(jobs)
     } catch {
       // 列表刷新不是关键路径，失败就算了
     }
@@ -87,14 +99,18 @@ export default function App() {
     if (!url || agentBusy) return
     setAgentBusy(true)
     setNotice(null)
+    const token = selection.current
     try {
       const job = await api.startAgentJob(url, agentExtra.trim() || undefined)
-      setActiveJob(job)
-      setActiveJobId(job.id)
-      setLogOpen(true)
-      setAgentUrl('')
-      setAgentExtra('')
-      setDraft(false)
+      if (token === selection.current) {
+        activateJob(job.id)
+        setActiveJob(job)
+        setLogOpen(true)
+        setAgentUrl('')
+        setAgentExtra('')
+        setDraft(false)
+      }
+      jobsRevision.current += 1
       setAgentJobs((prev) => [agentSummaryOf(job), ...prev.filter((item) => item.id !== job.id)])
     } catch (error) {
       setNotice({ kind: 'error', text: `AI 抓取启动失败：${(error as Error).message}` })
@@ -105,30 +121,33 @@ export default function App() {
 
   const startNewSession = () => {
     setDraft(true)
-    setActiveJobId(null)
+    activateJob(null)
     setActiveJob(null)
     setLogOpen(false)
   }
 
   const selectAgentJob = async (summary: AgentJobSummary, openLog = true) => {
     setDraft(false)
-    setActiveJobId(summary.id)
+    const token = activateJob(summary.id)
     setActiveJob(null)
     setLogOpen(openLog)
     try {
-      setActiveJob(await api.agentJob(summary.id))
+      const job = await api.agentJob(summary.id)
+      if (token === selection.current) setActiveJob(job)
     } catch (error) {
       setNotice({ kind: 'error', text: `读取抓取记录失败：${(error as Error).message}` })
     }
   }
 
   const deleteAgentJob = async (job: AgentJobSummary) => {
+    jobsRevision.current += 1
+    const token = selection.current
     try {
       await api.deleteAgentJob(job.id)
       const rest = agentJobs.filter((item) => item.id !== job.id)
-      setAgentJobs(rest)
-      if (activeJobId === job.id) {
-        setActiveJobId(null)
+      setAgentJobs((prev) => prev.filter((item) => item.id !== job.id))
+      if (activeJobId === job.id && token === selection.current) {
+        activateJob(null)
         setActiveJob(null)
         setLogOpen(false)
         if (rest[0]) void selectAgentJob(rest[0], false)
@@ -143,20 +162,35 @@ export default function App() {
   /** 手动补/删商品（人工对照原始页面） */
   const addAgentProduct = async (payload: AgentProductInput) => {
     if (activeJobId === null) return
+    const token = selection.current
     try {
-      await api.addAgentJobProduct(activeJobId, payload)
-      setActiveJob(await api.agentJob(activeJobId))
+      const product = await api.addAgentJobProduct(activeJobId, payload)
+      jobsRevision.current += 1
+      if (token === selection.current) setActiveJob((prev) => prev && ({
+        ...prev, products: [...prev.products, product], product_count: prev.product_count + 1,
+      }))
+      setAgentJobs((prev) => prev.map((item) => item.id === activeJobId
+        ? { ...item, product_count: item.product_count + 1 } : item))
       setNotice({ kind: 'info', text: `已补充商品：${payload.name.slice(0, 20)}` })
     } catch (error) {
       setNotice({ kind: 'error', text: `添加失败：${(error as Error).message}` })
+      throw error
     }
   }
 
   const deleteAgentProduct = async (productId: number) => {
     if (activeJobId === null) return
+    const token = selection.current
     try {
       await api.deleteAgentJobProduct(activeJobId, productId)
-      setActiveJob(await api.agentJob(activeJobId))
+      jobsRevision.current += 1
+      if (token === selection.current) setActiveJob((prev) => {
+        if (!prev) return prev
+        const products = prev.products.filter((product) => product.id !== productId)
+        return { ...prev, products, product_count: products.length }
+      })
+      setAgentJobs((prev) => prev.map((item) => item.id === activeJobId
+        ? { ...item, product_count: Math.max(0, item.product_count - 1) } : item))
     } catch (error) {
       setNotice({ kind: 'error', text: `删除失败：${(error as Error).message}` })
     }
@@ -165,8 +199,9 @@ export default function App() {
   /** 追问：接着当前会话继续聊（同一 job，agent 带着上下文改 products.json） */
   /** 淘宝浏览器上架任务起来后，接到同一套 job 状态里（popup/左栏/轮询都能用） */
   const handlePublishJobStarted = (job: AgentJob) => {
+    jobsRevision.current += 1
     setActiveJob(job)
-    setActiveJobId(job.id)
+    activateJob(job.id)
     setLogOpen(true)
     setDraft(false)
     setAgentJobs((prev) => [agentSummaryOf(job), ...prev.filter((item) => item.id !== job.id)])
@@ -174,10 +209,13 @@ export default function App() {
 
   const chatAgentJob = async (message: string) => {
     if (activeJobId === null) return
+    const token = selection.current
     try {
       const job = await api.chatAgentJob(activeJobId, message)
-      setActiveJob(job)
-      setLogOpen(true)
+      if (token === selection.current) {
+        setActiveJob(job)
+        setLogOpen(true)
+      }
     } catch (error) {
       setNotice({ kind: 'error', text: `追问失败：${(error as Error).message}` })
     }
@@ -202,12 +240,13 @@ export default function App() {
   useEffect(() => {
     if (activeJobId === null) return
     if (activeJob?.status !== 'running') return
+    const token = selection.current
     let cancelled = false
     let timer: number | undefined
     const tick = async () => {
       try {
         const job = await api.agentJob(activeJobId)
-        if (cancelled) return
+        if (cancelled || token !== selection.current) return
         setActiveJob(job)
         setAgentJobs((prev) => prev.map((item) => (item.id === job.id ? agentSummaryOf(job) : item)))
         if (job.status === 'running') {
@@ -277,6 +316,7 @@ export default function App() {
               <SourceFrame url={activeJob.url} title={activeJob.title} />
             )}
             <AgentPanel
+              key={activeJobId ?? 'draft'}
               draft={draft}
               agentUrl={agentUrl}
               onAgentUrlChange={setAgentUrl}

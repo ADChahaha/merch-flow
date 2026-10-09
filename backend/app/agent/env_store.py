@@ -7,14 +7,22 @@
 from __future__ import annotations
 
 import os
+import tempfile
+import threading
 from pathlib import Path
 
 from ..config import DATA_DIR
 
 ENV_PATH = DATA_DIR / ".env"
+ENV_LOCK = threading.RLock()
 
 
 def update_env_file(updates: dict[str, str], path: Path | None = None) -> Path:
+    with ENV_LOCK:
+        return _write_env_file(updates, path)
+
+
+def _write_env_file(updates: dict[str, str], path: Path | None) -> Path:
     target = path or ENV_PATH
     lines: list[str] = []
     if target.exists():
@@ -34,11 +42,15 @@ def update_env_file(updates: dict[str, str], path: Path | None = None) -> Path:
         out.append(f"{key}={value}")
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+    temporary = None
     try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write("\n".join(out).rstrip("\n") + "\n")
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return target
 
 
