@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -24,6 +23,7 @@ from ..db import session_scope
 from ..domain.listing import utcnow
 from ..models import AgentJob, AgentProduct
 from .tokens import read_session_usage
+from .processes import kill_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -224,9 +224,9 @@ class JobManager:
 
     def delete(self, job_id: int) -> bool:
         """删任务：跑着就先杀，然后连同落库的商品一起删。"""
-        self._kill(job_id)
         with self._lock:
             self._jobs.pop(job_id, None)
+        self._kill(job_id)
         from ..models import AgentJob as _AgentJob
 
         with session_scope() as session:
@@ -248,16 +248,7 @@ class JobManager:
             proc = self._procs.get(job_id)
         if proc is None or proc.poll() is not None:
             return
-        try:
-            if os.name == "nt":
-                proc.kill()
-            else:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+        kill_process_tree(proc)
 
     def _append_log(self, live: LiveJob, level: str, text: str) -> None:
         live.log.append({"level": level, "text": text, "at": datetime.now().isoformat(timespec="seconds")})
@@ -273,7 +264,9 @@ class JobManager:
             if not live.title:
                 live.title = str(event.get("title") or "")
         elif kind == "result":
-            live.products = list(event.get("products") or [])
+            # 失败结果通常带空 products；保留上一轮已确认的数据。
+            if not event.get("error"):
+                live.products = list(event.get("products") or [])
             live.pages_visited = max(live.pages_visited, int(event.get("pages_visited") or 0))
             live.title = str(event.get("title") or live.title)
             live.agent_session = str(event.get("session_id") or live.agent_session)
@@ -335,31 +328,33 @@ class JobManager:
 
         started = time.monotonic()
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(settings.data_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
-                # 单独进程组：超时/删除时把 dsh、它的 bash 子进程一起带走，别留孤儿
-                start_new_session=True,
-            )
+            with self._lock:
+                # 删除与启动互斥，防止用户点删除后才注册出一个孤儿进程。
+                if self._jobs.get(job_id) is not live:
+                    return
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(settings.data_dir),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    env=env,
+                    # 与桌面壳隔离；清理时遍历整个进程树，包括独立的 dsh 进程组
+                    start_new_session=True,
+                )
+                self._procs[job_id] = proc
         except OSError as exc:
-            live.status = "error"
             live.error = f"起 harness 失败：{exc}"
             self._append_log(live, "error", live.error)
-            self._persist(live)
+            self._persist(live, status="error")
             return
-
-        with self._lock:
-            self._procs[job_id] = proc
 
         timer = threading.Timer(settings.agent_total_timeout, self._on_timeout, args=(job_id,))
         timer.daemon = True
         timer.start()
 
+        final_status = "error"
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -374,35 +369,31 @@ class JobManager:
                 if isinstance(event, dict):
                     self._handle_event(live, event)
             proc.wait()
-            if live.status == "running":
-                live.status = "done" if proc.returncode == 0 else "error"
-                if proc.returncode != 0 and not live.error:
-                    live.error = f"harness 退出码 {proc.returncode}"
+            final_status = "done" if proc.returncode == 0 and not live.error else "error"
+            if proc.returncode != 0 and not live.error:
+                live.error = f"harness 退出码 {proc.returncode}"
         except Exception as exc:  # noqa: BLE001 读流里出什么都不该把线程带走
-            live.status = "error"
             live.error = f"任务异常：{exc}"
             self._append_log(live, "error", live.error)
         finally:
             timer.cancel()
+            self._kill(job_id)
             with self._lock:
                 self._procs.pop(job_id, None)
-            if live.status == "running":
-                live.status = "error"
-                live.error = live.error or "任务意外结束"
             elapsed = time.monotonic() - started
-            self._append_log(live, "info", f"任务结束（{elapsed:.1f}s，状态 {live.status}）")
-            self._persist(live)
+            self._append_log(live, "info", f"任务结束（{elapsed:.1f}s，状态 {final_status}）")
+            self._persist(live, status=final_status)
 
     def _on_timeout(self, job_id: int) -> None:
         live = self.get(job_id)
         if live is None or live.status != "running":
             return
-        live.status = "error"
         live.error = f"总超时（{settings.agent_total_timeout:.0f}s），已终止"
         self._append_log(live, "error", live.error)
         self._kill(job_id)
 
-    def _persist(self, live: LiveJob) -> None:
+    def _persist(self, live: LiveJob, *, status: str | None = None) -> None:
+        final_status = status or live.status
         try:
             with session_scope() as session:
                 job = session.get(AgentJob, live.id)
@@ -410,31 +401,42 @@ class JobManager:
                     return
                 job.title = live.title or job.url
                 job.kind = live.kind
-                job.status = live.status
+                job.status = final_status
                 job.error = live.error
                 job.pages_visited = live.pages_visited
                 job.agent_session = live.agent_session
                 job.usage = live.usage or {}
                 job.log = live.log[-MAX_LOG_LINES:]
                 job.finished_at = utcnow()
-                for existing in list(job.products):
-                    session.delete(existing)
+                existing = {row.id: row for row in job.products}
+                retained = {product.get("id") for product in live.products}
+                for product_id, row in existing.items():
+                    if product_id not in retained:
+                        session.delete(row)
                 session.flush()
+                saved = []
                 for position, product in enumerate(live.products):
-                    job.products.append(
-                        AgentProduct(
-                            position=position,
-                            name=str(product.get("name") or "")[:2000],
-                            price=product.get("price"),
-                            price_text=str(product.get("price_text") or "")[:500],
-                            date_text=str(product.get("date_text") or "")[:500],
-                            detail=str(product.get("detail") or ""),
-                            image_urls=list(product.get("image_urls") or []),
-                            source_url=str(product.get("source_url") or "")[:2000],
-                        )
-                    )
-        except Exception:  # noqa: BLE001 落库失败只记日志，任务状态保持内存里的
+                    row = existing.get(product.get("id"))
+                    if row is None:
+                        row = AgentProduct(job_id=live.id)
+                        session.add(row)
+                    row.position = position
+                    row.name = str(product.get("name") or "")[:2000]
+                    row.price = product.get("price")
+                    row.price_text = str(product.get("price_text") or "")[:500]
+                    row.date_text = str(product.get("date_text") or "")[:500]
+                    row.detail = str(product.get("detail") or "")
+                    row.image_urls = list(product.get("image_urls") or [])
+                    row.source_url = str(product.get("source_url") or "")[:2000]
+                    session.flush()
+                    saved.append({**product, "id": row.id})
+            # 提交成功后才结束轮询，确保用户能立即删除刚抓到的商品。
+            live.products = saved
+            live.status = final_status
+        except Exception:  # noqa: BLE001
             logger.exception("AI 抓取任务 %s 落库失败", live.id)
+            live.error = live.error or "保存商品失败，请重试"
+            live.status = "error"
 
 
 manager = JobManager()

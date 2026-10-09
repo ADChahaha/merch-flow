@@ -20,6 +20,8 @@ import sys
 import threading
 from pathlib import Path
 
+from .processes import kill_process_tree
+
 PROTOCOL_VERSION = 1
 DEFAULT_TIMEOUT = 900.0
 
@@ -160,16 +162,7 @@ class AcpClient:
         proc, self.proc = self.proc, None
         if proc is None:
             return
-        try:
-            if os.name == "nt":
-                proc.kill()
-            else:
-                os.killpg(os.getpgid(proc.pid), 15)
-        except (OSError, ProcessLookupError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+        kill_process_tree(proc)
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             try:
                 if stream:

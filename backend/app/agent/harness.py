@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 import unicodedata
 from pathlib import Path
@@ -131,7 +132,7 @@ if __name__ == "__main__":
 
 
 def _fetch_wrapper(workdir: Path, script: str = "fetch_page.py") -> str:
-    return "#!/bin/sh\n" f'exec "{{sys.executable}}" "{{workdir / script}}" "$@"\n'
+    return f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(workdir / script))} "$@"\n'
 
 
 def _frozen_wrappers(out_dir: Path) -> None:
@@ -293,6 +294,9 @@ def run_task(
             existing = out_dir / "publish_payload.json"
             payload = json.loads(existing.read_text(encoding="utf-8")) if existing.exists() else {}
         write_publish_workdir(out_dir, payload)
+        (out_dir / "dsh.patch.yml").write_text(_dsh_patch(model, thinking), encoding="utf-8")
+        # 每轮必须有本轮的报告，不能误读上次成功的文件。
+        (out_dir / "publish_result.json").unlink(missing_ok=True)
     else:
         write_workdir(out_dir, url, model=model, thinking=thinking)
 
@@ -391,10 +395,11 @@ def run_task(
                 result["title"] = f"淘宝上架（{count} 件）"
                 result["report"] = report
                 message = str(report.get("message") or "")
-                if report.get("ok"):
+                if report.get("ok") is True and not report.get("need_human"):
                     emit("info", f"上架结果：{message or '完成'}")
                 else:
-                    emit("error", f"上架未完成：{message or report}")
+                    result["error"] = f"上架未完成：{message or report}"
+                    emit("error", result["error"])
                 if report.get("need_human"):
                     emit("info", f"需要真人：{report['need_human']}")
             else:
@@ -449,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     (Path(args.out) / "result.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    return 0 if result["products"] or not result["error"] else 1
+    return 1 if result["error"] else 0
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import subprocess
+import shutil
 from pathlib import Path
 
 import pytest
@@ -63,7 +65,7 @@ def test_build_env_keeps_path_and_adds_node_locations(tmp_path, monkeypatch):
     fake_npm_bin = tmp_path / "npm-bin"
     fake_npm_bin.mkdir()
     monkeypatch.setattr(acp_module, "_node_paths", lambda: [fake_npm_bin])
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
 
     env = acp_module.build_env("sk-test")
 
@@ -439,3 +441,58 @@ def test_run_task_passes_model_and_thinking(tmp_path):
     run(tmp_path, acp_factory=ModelAcp, model="deepseek-v4-pro", thinking="high")
     assert "model: deepseek-v4-pro" in seen["patch"]
     assert "reasoningEffort: high" in seen["patch"]
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="requires a POSIX shell")
+@pytest.mark.parametrize("command", ["fetch", "fetch_raw"])
+def test_generated_fetch_wrapper_executes_python(tmp_path, command):
+    work = tmp_path / "path with spaces and 'quotes'"
+    write_workdir(work, URL, model="test", thinking="off")
+    # 替换网络脚本，真实执行壳来验证解释器、脚本路径和参数引用。
+    (work / f"{command}_page.py").write_text(
+        "import sys; print(sys.argv[1])", encoding="utf-8"
+    )
+    completed = subprocess.run(
+        [shutil.which("sh"), str(work / command), "https://example.com/a?x=1&y=2"],
+        text=True, capture_output=True, timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "https://example.com/a?x=1&y=2"
+
+
+@pytest.mark.parametrize("report", [
+    {"ok": False, "message": "图片上传失败"},
+    {"ok": False, "need_human": "请扫码登录"},
+    {"ok": True, "need_human": "请确认后再提交"},
+    {"ok": "false", "message": "无效报告"},
+])
+def test_unsuccessful_publish_is_an_error(tmp_path, report):
+    result, _, _ = run(
+        tmp_path, acp_factory=fake_factory(publish_result=report),
+        kind="taobao_publish", payload={"items": [{"name": "A"}]},
+    )
+    assert result["error"]
+
+
+def test_publish_prepares_model_patch_and_discards_previous_report(tmp_path):
+    (tmp_path / "publish_result.json").write_text('{"ok": true}', encoding="utf-8")
+
+    class CheckPatch(fake_factory(writes_products=False)):
+        def __init__(self, cwd, **kwargs):
+            patch = Path(kwargs["patch_path"]).read_text(encoding="utf-8")
+            assert "model: deepseek-v4-pro" in patch
+            assert "reasoningEffort: high" in patch
+            super().__init__(cwd, **kwargs)
+
+    result, _, _ = run(
+        tmp_path, acp_factory=CheckPatch, kind="taobao_publish",
+        payload={"items": [{"name": "A"}]}, model="deepseek-v4-pro", thinking="high",
+    )
+    assert "没有写 publish_result.json" in result["error"]
+
+
+def test_cli_returns_failure_even_if_error_contains_products(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness_module, "run_task", lambda *a, **kw: {
+        "products": [{"name": "old"}], "error": "API failed",
+    })
+    assert harness_module.main(["--url", URL, "--out", str(tmp_path)]) == 1

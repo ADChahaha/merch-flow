@@ -1,6 +1,6 @@
 {
   "name": "merch-flow-desktop",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Electron 壳：内置 Python 后端（FastAPI + 前端 dist）的桌面应用",
   "main": "main.js",
@@ -41,7 +41,9 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         }
       ]
     },
@@ -49,7 +51,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

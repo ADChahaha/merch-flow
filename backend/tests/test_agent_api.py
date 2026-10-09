@@ -479,3 +479,48 @@ def test_failed_harness_marks_job_error(agent_client):
     assert body["products"] == []
     job = wait_persisted(factory, job_id)
     assert job["status"] == "error"
+
+
+
+def test_scraped_product_has_id_and_can_be_deleted_immediately(agent_client):
+    client, factory = agent_client
+    FakePopen.lines = [{"type": "result", **RESULT}]
+    job_id = client.post("/api/agent/jobs", json={"url": URL}).json()["id"]
+    product = wait_done(client, job_id)["products"][0]
+    assert isinstance(product["id"], int)
+    response = client.delete(f"/api/agent/jobs/{job_id}/products/{product['id']}")
+    assert response.status_code == 200
+    assert client.get(f"/api/agent/jobs/{job_id}").json()["products"] == []
+    assert wait_persisted(factory, job_id)["products"] == []
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_failed_chat_preserves_saved_products_and_ids(agent_client, exit_code):
+    client, factory = agent_client
+    FakePopen.lines = [{"type": "result", **RESULT, "session_id": "sess-1"}]
+    job_id = client.post("/api/agent/jobs", json={"url": URL}).json()["id"]
+    original = wait_done(client, job_id)["products"]
+    FakePopen.lines = [{"type": "result", "products": [], "error": "API unavailable"}]
+    FakePopen.returncode = exit_code
+    client.post(f"/api/agent/jobs/{job_id}/chat", json={"message": "再核对"})
+    body = wait_done(client, job_id)
+    assert body["status"] == "error"
+    assert body["products"] == original
+    from app.models import AgentJob
+    with factory() as session:
+        row = session.get(AgentJob, job_id)
+        assert row.status == "error"
+        assert [p.id for p in row.products] == [p["id"] for p in original]
+
+
+def test_successful_chat_can_explicitly_clear_products(agent_client):
+    client, factory = agent_client
+    FakePopen.lines = [{"type": "result", **RESULT}]
+    job_id = client.post("/api/agent/jobs", json={"url": URL}).json()["id"]
+    wait_done(client, job_id)
+    FakePopen.lines = [{"type": "result", "products": [], "error": ""}]
+    client.post(f"/api/agent/jobs/{job_id}/chat", json={"message": "清空商品"})
+    body = wait_done(client, job_id)
+    assert body["status"] == "done"
+    assert body["products"] == []
+    assert wait_persisted(factory, job_id)["products"] == []
