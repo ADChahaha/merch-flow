@@ -14,11 +14,13 @@ import sys
 from pathlib import Path
 
 from ..config import settings
+from ..stdio import configure_stdio
 from .fetch import Fetcher
 from .page import extract_images, extract_links, extract_text, page_title, parse_html
 
 
 def json_main(argv: list[str]) -> int:
+    configure_stdio()
     if not argv:
         print("用法: fetch <url> [text_limit]", file=sys.stderr)
         return 2
@@ -45,6 +47,7 @@ def json_main(argv: list[str]) -> int:
 
 
 def raw_main(argv: list[str]) -> int:
+    configure_stdio()
     if not argv:
         print("用法: fetch_raw <url> [out.html]", file=sys.stderr)
         return 2
@@ -61,6 +64,7 @@ def raw_main(argv: list[str]) -> int:
 
 
 def main(argv: list[str]) -> int:
+    configure_stdio()
     if not argv or argv[0] not in {"json", "raw"}:
         print("用法: fetch json|raw <url> [...]", file=sys.stderr)
         return 2

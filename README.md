@@ -69,11 +69,26 @@ cd frontend && npm run build
 cd desktop && npx electron-builder --mac   # 或 --win
 
 # 3. 发版：打 tag 推上去，GitHub Actions 双端构建并挂到 Release
-git tag v0.3.0 && git push origin v0.3.0
+git tag v0.3.4 && git push origin v0.3.4
 ```
 
-`.github/workflows/release.yml`：tag 推送触发 macOS(arm64) + Windows(x64) 矩阵构建，
-产物自动附加到对应 GitHub Release。也可以在 Actions 页手动 `workflow_dispatch` 只跑构建验证。
+`.github/workflows/ci.yml`：每次 main 推送和 PR 均在 Windows(x64) / macOS(arm64)
+运行后端与前端测试、构建后端、验证真实冻结产物并生成安装包。测试还会再次运行 Electron 包内的后端。
+CP936/CP1252 回归测试强制旧编码标准流；打包测试通过真实进程管道验证中文、日文、emoji 和商品入库，
+不依赖付费模型（外部 ACP 服务用离线 fixture 替代）。Windows runner 本身不必改成中文系统区域。
+
+`.github/workflows/release.yml`：tag 推送复用上述 CI，**双平台全部通过才发布**。
+发布说明放在 `docs/releases/<tag>.md`。Actions 页也可手动运行 CI。
+
+本地验证冻结产物（先完成 PyInstaller 构建）：
+
+```powershell
+# Windows PowerShell
+$env:MERCH_TEST_BACKEND = (Resolve-Path backend/dist/merch-backend/merch-backend.exe).Path
+python -m pytest -q backend/tests/test_packaged_encoding.py -k frozen
+```
+
+v0.3.4 起标准输入输出和打包解释器均固定 UTF-8，不需要更改系统编码或关闭沙箱。
 
 ## 目录一览
 

@@ -21,6 +21,8 @@ import sys
 import time
 from pathlib import Path
 
+from ..stdio import configure_stdio
+
 CDP = "http://127.0.0.1:9222"
 SHOTS = Path("shots")
 
@@ -89,6 +91,7 @@ def launch() -> int:
 
 
 def main(argv=None) -> int:
+    configure_stdio()
     parser = argparse.ArgumentParser()
     parser.add_argument("command")
     parser.add_argument("args", nargs="*")

@@ -29,6 +29,7 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 from ..config import BASE_DIR, settings
+from ..stdio import configure_stdio
 from .acp import AcpClient, AcpError, summarize_update
 from .publish import build_publish_prompt, read_publish_result, write_publish_workdir
 from .tokens import format_usage, read_session_usage
@@ -437,6 +438,7 @@ def run_task(
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_stdio()
     parser = argparse.ArgumentParser(description="把 URL / 追问交给 deepseek harness（dsh ACP）")
     parser.add_argument("--url", required=True, help="任务入口 URL（续聊时用于上下文）")
     parser.add_argument("--out", required=True, help="任务目录（agent 在这里工作，products.json 也写这里）")

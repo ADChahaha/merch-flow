@@ -13,8 +13,11 @@ from __future__ import annotations
 import os
 import sys
 
+from app.stdio import configure_stdio
+
 
 def main() -> int:
+    configure_stdio()
     if len(sys.argv) > 1 and sys.argv[1] == "--harness":
         from app.agent.harness import main as harness_main
 
