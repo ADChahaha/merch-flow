@@ -52,7 +52,7 @@ def test_resolve_command_finds_npm_shim(monkeypatch):
 
     resolved = r"C:\\Users\\x\\AppData\\Roaming\\npm\\dsh.cmd"
     monkeypatch.setattr(acp_module.shutil, "which", lambda name: resolved)
-    assert acp_module.resolve_command() == resolved
+    assert Path(acp_module.resolve_command()) == Path(resolved)
 
     monkeypatch.setattr(acp_module.shutil, "which", lambda name: None)
     assert acp_module.resolve_command() == "dsh"  # 兜底留原名，报错更直观

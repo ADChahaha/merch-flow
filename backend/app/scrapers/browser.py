@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _WINDOWS_ENV = re.compile(r"%([^%]+)%")
 
@@ -95,7 +95,8 @@ def _is_browser(path: str) -> bool:
 
 def bundle_path(chrome_binary: str) -> str | None:
     """/Applications/Google Chrome.app/Contents/MacOS/Google Chrome → .app（macOS 专用）。"""
-    for parent in Path(chrome_binary).parents:
+    # A .app path is always POSIX syntax, even when this helper is tested on Windows.
+    for parent in PurePosixPath(chrome_binary).parents:
         if parent.suffix == ".app":
             return str(parent)
     return None

@@ -9,11 +9,12 @@ from app.agent import acp
 
 def test_resolve_command_uses_augmented_path(monkeypatch, tmp_path):
     seen = {}
+    resolved = str(tmp_path / 'dsh.cmd')
     def which(name, *, path):
         seen.update(name=name, path=path)
-        return 'dsh.cmd'
+        return resolved
     monkeypatch.setattr(acp.shutil, 'which', which)
-    assert acp.resolve_command(path=str(tmp_path)) == 'dsh.cmd'
+    assert acp.resolve_command(path=str(tmp_path)) == resolved
     assert seen['path'] == str(tmp_path)
 
 

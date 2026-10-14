@@ -67,7 +67,13 @@ def resolve_command(name: str = "dsh", *, path: str | None = None) -> str:
     直接 Popen(["dsh"]) 会 FileNotFoundError —— shutil.which 会按 PATHEXT 找 .cmd。
     找不到时返回原名，让 Popen 抛错、错误信息里能看到实际尝试的名字。
     """
-    return (shutil.which(name, path=path) if path is not None else shutil.which(name)) or name
+    resolved = (shutil.which(name, path=path) if path is not None else shutil.which(name)) or name
+    # shutil.which may return a relative .CMD path on Windows (for example when
+    # the npm shim is found in the current directory). ACP runs from the task
+    # output directory, so anchor that path before changing cwd in Popen.
+    if os.name == "nt" and resolved != name:
+        return str(Path(resolved).resolve())
+    return resolved
 
 
 def build_env(api_key: str = "") -> dict:
@@ -143,9 +149,19 @@ class AcpClient:
             cmd += ["--patch", self.patch_path]
         cmd += ["--profile", "acp"]
 
+        # npm installs Windows CLI entry points as .cmd files. CreateProcess
+        # cannot execute those directly; route the resolved shim through cmd.exe.
+        # list2cmdline preserves Windows argument quoting for paths with spaces.
+        popen_cmd: str | list[str] = cmd
+        use_shell = False
+        if os.name == "nt" and Path(cmd[0]).suffix.lower() in {".cmd", ".bat"}:
+            popen_cmd = subprocess.list2cmdline(cmd)
+            use_shell = True
+
         try:
             self.proc = subprocess.Popen(
-                cmd,
+                popen_cmd,
+                shell=use_shell,
                 cwd=self.cwd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
