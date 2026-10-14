@@ -83,7 +83,8 @@ def test_harness_unicode_pipes(backend_command, runtime):
     code, stdout, stderr = run_cli(backend_command, [
         "--harness", "--url", "https://example.com/", "--out", str(out), "--extra", SAMPLE,
     ], root, env)
-    assert code == 0, (stdout, stderr)
+    if code != 0:
+        pytest.fail(f"harness exit {code}\n{stdout}\n{stderr}")
     events = [json.loads(line) for line in stdout.splitlines()]
     logs = [event["text"] for event in events if event["type"] == "log"]
     assert "read（in_progress）" in logs
@@ -169,7 +170,8 @@ def test_job_api_unicode_roundtrip(backend_command, runtime):
                 if job["status"] != "running":
                     break
                 time.sleep(0.1)
-            assert job["status"] == "done", job
+            if job["status"] != "done":
+                pytest.fail(json.dumps(job, ensure_ascii=True, indent=2))
             assert job["products"][0]["name"] == SAMPLE
             assert "工具调用（completed）" in [line["text"] for line in job["log"]]
             assert "\ufffd" not in json.dumps(job, ensure_ascii=False)

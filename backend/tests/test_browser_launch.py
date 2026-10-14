@@ -104,7 +104,7 @@ def test_windows_candidates_expand_env_vars(monkeypatch):
 def test_bundle_path_extracts_app():
     assert (
         bundle_path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-        == "/Applications/Google Chrome.app"
+        == str(Path("/Applications/Google Chrome.app"))
     )
     assert bundle_path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge") == (
         "/Applications/Microsoft Edge.app"
@@ -154,7 +154,7 @@ def test_macos_background_launch_uses_open_dash_g(monkeypatch):
     cmd = FakePopen.calls[0][0]
     assert cmd[:2] == ["open", "-g"], "-g 是关键：启动但不激活，窗口不抢焦点"
     assert "-n" in cmd and "-a" in cmd
-    assert "/Applications/Google Chrome.app" in cmd
+    assert str(Path("/Applications/Google Chrome.app")) in cmd
     assert "--args" in cmd
     assert "https://example.com" in cmd
 

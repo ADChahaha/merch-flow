@@ -16,7 +16,7 @@ from app.agent.jobs import JobManager, LiveJob
 from app.agent.processes import kill_process_tree
 
 
-@pytest.mark.parametrize("action", ["delete", "timeout", "shutdown", "acp_stop", "group_signal_denied"])
+@pytest.mark.parametrize("action", ["delete", "timeout", "shutdown", "acp_stop", "group_signal_denied", "suspend_denied"])
 def test_stopping_task_kills_detached_descendants(tmp_path, monkeypatch, action):
     child_pid = tmp_path / "child.json"
     script = tmp_path / "parent.py"
@@ -39,6 +39,10 @@ def test_stopping_task_kills_detached_descendants(tmp_path, monkeypatch, action)
         child = psutil.Process(json.loads(child_pid.read_text()))
         if os.name != "nt":
             assert os.getpgid(child.pid) != os.getpgid(proc.pid)
+        if action == "suspend_denied":
+            def deny_suspend(process):
+                raise psutil.AccessDenied(process.pid)
+            monkeypatch.setattr(psutil.Process, "suspend", deny_suspend)
         if action == "group_signal_denied" and os.name != "nt":
             def denied(*args):
                 raise PermissionError("group has exited")

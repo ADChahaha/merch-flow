@@ -115,9 +115,10 @@ def test_idle_reaper_closes_and_forgets_transport(monkeypatch):
     transport_module._TRANSPORT_CACHE.clear()
     transport_module._LAST_USED.clear()
     transport_module._TRANSPORT_CACHE["surugaya:chrome_cdp"] = FakeTransport()
-    transport_module._LAST_USED["surugaya:chrome_cdp"] = 0.0  # 很久没用过
+    now = transport_module.time.monotonic()
+    transport_module._LAST_USED["surugaya:chrome_cdp"] = now - 181
     transport_module._TRANSPORT_CACHE["melonbooks:http"] = FakeTransport()
-    transport_module._LAST_USED["melonbooks:http"] = 1e18  # 刚刚用过
+    transport_module._LAST_USED["melonbooks:http"] = now
 
     transport_module._reap_once(idle_timeout=180)
 

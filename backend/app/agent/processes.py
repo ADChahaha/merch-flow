@@ -18,12 +18,17 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
     try:
         if proc.poll() is None:
             root = psutil.Process(proc.pid)
-            root.suspend()
+            try:
+                root.suspend()
+            except psutil.AccessDenied:
+                # Windows can deny NtSuspendProcess while the child is exiting.
+                # Suspending is best-effort; still enumerate/kill/wait below.
+                logger.debug("无法暂停待清理进程 %s", proc.pid)
             children = root.children(recursive=True)
             for child in children:
                 try:
                     child.suspend()
-                except psutil.NoSuchProcess:
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             # 收集独立进程组；组内被系统接管的孤儿进程无法靠 children 找到。
             children = root.children(recursive=True)
