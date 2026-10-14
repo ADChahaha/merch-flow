@@ -73,9 +73,17 @@ def test_stopping_task_kills_detached_descendants(tmp_path, monkeypatch, action)
             client.stop()
         assert proc.poll() is not None
         deadline = time.monotonic() + 5
-        while child.is_running() and child.status() != psutil.STATUS_ZOMBIE and time.monotonic() < deadline:
+
+        def child_stopped():
+            try:
+                return not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                # The process may exit between is_running() and status().
+                return True
+
+        while not child_stopped() and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+        assert child_stopped()
     finally:
         if child is not None and child.is_running():
             try:
